@@ -30,10 +30,10 @@ ping frames.
 
 1. After 15 seconds with no inbound frame, the extension sends an RFC 6455
    protocol ping.
-2. If another 5 seconds pass after that ping with no inbound frame, the turn
+2. If another 10 seconds pass after that ping with no inbound frame, the turn
    fails and the extension closes the socket.
 
-The defaults are `15000` and `5000` milliseconds and can be changed with the
+The defaults are `15000` and `10000` milliseconds and can be changed with the
 environment variables below.
 
 A live probe on 2026-08-18 measured quiet-socket pongs at about 75 ms. During an
@@ -49,7 +49,7 @@ open.
 | --- | --- | --- |
 | `PI_XAI_WS_URL` | Derived from `model.baseUrl`, otherwise `wss://api.x.ai/v1/responses` | WebSocket URL. Required when `xai.baseUrl` does not use `api.x.ai` so proxy credentials are not sent to public xAI. |
 | `PI_XAI_WS_PING_INTERVAL_MS` | `15000` | Inbound silence in milliseconds before a protocol ping. |
-| `PI_XAI_WS_LIVENESS_TIMEOUT_MS` | `5000` | Additional inbound silence in milliseconds after the ping before the turn fails. |
+| `PI_XAI_WS_LIVENESS_TIMEOUT_MS` | `10000` | Additional inbound silence in milliseconds after the ping before the turn fails. |
 
 With `cacheRetention: "none"`, the extension omits `prompt_cache_key` and
 `x-grok-conv-id`.

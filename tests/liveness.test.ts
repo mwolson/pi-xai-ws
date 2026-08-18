@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { SocketLiveness } from "../src/liveness.ts";
+import { DEFAULT_LIVENESS_TIMEOUT_MS, SocketLiveness } from "../src/liveness.ts";
 
 describe("SocketLiveness", () => {
+    it("defaults the post-ping timeout to 10 seconds", () => {
+        const live = new SocketLiveness(
+            () => {},
+            () => {},
+        );
+        assert.equal(live.livenessTimeoutMs, 10_000);
+        assert.equal(DEFAULT_LIVENESS_TIMEOUT_MS, 10_000);
+    });
+
     it("sends a ping after the quiet interval and fails if nothing returns", () => {
         let now = 1_000;
         let pings = 0;
@@ -17,7 +26,7 @@ describe("SocketLiveness", () => {
             },
             {
                 pingIntervalMs: 15_000,
-                livenessTimeoutMs: 5_000,
+                livenessTimeoutMs: 10_000,
                 now: () => now,
             },
         );
@@ -35,7 +44,7 @@ describe("SocketLiveness", () => {
         assert.equal(pings, 1);
         assert.equal(dead, undefined);
 
-        now += 4_999;
+        now += 9_999;
         live.tick();
         assert.equal(pings, 1);
         assert.equal(dead, undefined);
@@ -43,7 +52,7 @@ describe("SocketLiveness", () => {
         now += 1;
         live.tick();
         assert.equal(pings, 1);
-        assert.match(dead ?? "", /silent for 20000ms after ping/);
+        assert.match(dead ?? "", /silent for 25000ms after ping/);
     });
 
     it("sends a ping before failing when the first tick jumps past the full budget", () => {
@@ -60,17 +69,17 @@ describe("SocketLiveness", () => {
             },
             {
                 pingIntervalMs: 15_000,
-                livenessTimeoutMs: 5_000,
+                livenessTimeoutMs: 10_000,
                 now: () => now,
             },
         );
 
-        now += 21_000;
+        now += 26_000;
         live.tick();
         assert.equal(pings, 1);
         assert.equal(dead, undefined);
 
-        now += 4_999;
+        now += 9_999;
         live.tick();
         assert.equal(dead, undefined);
 
@@ -94,7 +103,7 @@ describe("SocketLiveness", () => {
             },
             {
                 pingIntervalMs: 15_000,
-                livenessTimeoutMs: 5_000,
+                livenessTimeoutMs: 10_000,
                 now: () => now,
             },
         );
@@ -124,7 +133,7 @@ describe("SocketLiveness", () => {
             },
             {
                 pingIntervalMs: 15_000,
-                livenessTimeoutMs: 5_000,
+                livenessTimeoutMs: 10_000,
                 now: () => now,
             },
         );
