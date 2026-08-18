@@ -2,13 +2,12 @@
 
 WebSocket transport for Pi's built-in xAI Completions models.
 
-`pi-xai-ws` intercepts `grok-4.6`, `grok-4.3`, and `grok-build-0.1` in Pi
-0.84.2 and sends their turns to xAI's official Responses WebSocket:
+`pi-xai-ws` intercepts supported grok models in Pi and sends their turns to
+xAI's official Responses WebSocket:
 
 `wss://api.x.ai/v1/responses`
 
 It reuses the xAI API key or SuperGrok OAuth credentials already stored in Pi.
-`grok-4.5` stays on Pi's built-in HTTP Responses transport.
 
 ## Install
 
@@ -23,10 +22,6 @@ Or install a local checkout:
 ```sh
 pi install /absolute/path/to/pi-xai-ws
 ```
-
-T3 Nightly re-adds packages from `settings.json` around
-`pi --mode rpc --no-extensions`, so installing the package is enough to enable
-it there.
 
 Passing `models` to another `registerProvider("xai")` call replaces Pi's model
 catalog. Omit `models` to keep the built-in xAI models available.
@@ -82,7 +77,7 @@ History written by this package is Responses-shaped even though `api` remains
 ## Development
 
 Load sibling `dist/api` files through `src/pi-ai-api.ts`. Direct imports of
-`@earendil-works/pi-ai/api/...` abort every Pi 0.84 session at startup, because
+`@earendil-works/pi-ai/api/...` abort every Pi session at startup, because
 jiti aliases `@earendil-works/pi-ai` to `dist/compat.js`.
 
 Run the test suite with:
