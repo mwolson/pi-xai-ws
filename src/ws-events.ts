@@ -4,6 +4,7 @@ import { resolveLivenessTimeoutMs, resolvePingIntervalMs } from "./config.ts";
 import { SocketLiveness } from "./liveness.ts";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+const MAX_QUEUED_EVENTS = 4_096;
 
 const TERMINAL_TYPES = new Set([
     "response.completed",
@@ -137,12 +138,6 @@ export async function* iterateXaiWsEvents(
         wake();
     };
 
-    if (options.signal?.aborted) {
-        onAbort();
-    } else {
-        options.signal?.addEventListener("abort", onAbort, { once: true });
-    }
-
     ws.on("upgrade", (response) => {
         upgradeStatus = response.statusCode ?? 101;
         upgradeHeaders = flattenHeaders(response.headers);
@@ -150,6 +145,9 @@ export async function* iterateXaiWsEvents(
 
     ws.once("open", () => {
         void (async () => {
+            if (finished || isAbortError(closed)) {
+                return;
+            }
             try {
                 await options.onOpen?.({ status: upgradeStatus, headers: upgradeHeaders });
                 ws.send(JSON.stringify(options.createPayload));
@@ -162,6 +160,9 @@ export async function* iterateXaiWsEvents(
     });
 
     ws.on("message", (data) => {
+        if (finished) {
+            return;
+        }
         liveness.noteInbound();
         try {
             const parsed = JSON.parse(frameToUtf8(data)) as unknown;
@@ -173,7 +174,11 @@ export async function* iterateXaiWsEvents(
                 if (isTerminalEventType(type)) {
                     sawTerminal = true;
                 }
-                queue.push(event);
+                if (queue.length >= MAX_QUEUED_EVENTS) {
+                    closed = new Error("xAI WebSocket event queue overflow");
+                } else {
+                    queue.push(event);
+                }
             }
         } catch {
             closed = new Error("xAI WebSocket sent invalid JSON");
@@ -182,20 +187,32 @@ export async function* iterateXaiWsEvents(
     });
 
     ws.on("pong", () => {
+        if (finished) {
+            return;
+        }
         liveness.noteInbound();
         wake();
     });
 
     ws.on("ping", () => {
+        if (finished) {
+            return;
+        }
         liveness.noteInbound();
     });
 
     ws.on("error", (error) => {
+        if (finished || isAbortError(closed)) {
+            return;
+        }
         closed = error;
         wake();
     });
 
     ws.on("close", (code, reasonBuf) => {
+        if (finished) {
+            return;
+        }
         const reason = reasonBuf.toString("utf8");
         if (!finished && closed === undefined && !sawTerminal) {
             closed = new Error(
@@ -204,6 +221,12 @@ export async function* iterateXaiWsEvents(
         }
         wake();
     });
+
+    if (options.signal?.aborted) {
+        onAbort();
+    } else {
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+    }
 
     const cleanup = () => {
         finished = true;
