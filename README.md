@@ -8,16 +8,29 @@ the xAI API key or SuperGrok OAuth credentials already stored in Pi.
 
 ## Install
 
-Install from GitHub:
+`pi-xai-ws` requires Pi 0.84 or newer. Install it from npm:
+
+```sh
+pi install npm:@mwolson-org/pi-xai-ws
+```
+
+Try it for one run without adding it to your settings:
+
+```sh
+pi -e npm:@mwolson-org/pi-xai-ws
+```
+
+You can also install it from GitHub or a local checkout:
 
 ```sh
 pi install git:github.com/mwolson/pi-xai-ws
+pi install /absolute/path/to/pi-xai-ws
 ```
 
-Or install a local checkout:
+Remove the package with:
 
 ```sh
-pi install /absolute/path/to/pi-xai-ws
+pi remove npm:@mwolson-org/pi-xai-ws
 ```
 
 Passing `models` to another `registerProvider("xai")` call replaces Pi's model
