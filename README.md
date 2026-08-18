@@ -2,12 +2,9 @@
 
 WebSocket transport for Pi's built-in xAI Completions models.
 
-`pi-xai-ws` intercepts supported grok models in Pi and sends their turns to
-xAI's official Responses WebSocket:
-
-`wss://api.x.ai/v1/responses`
-
-It reuses the xAI API key or SuperGrok OAuth credentials already stored in Pi.
+`pi-xai-ws` intercepts supported Grok models in Pi and sends their turns to
+xAI's official Responses WebSocket at `wss://api.x.ai/v1/responses`. It reuses
+the xAI API key or SuperGrok OAuth credentials already stored in Pi.
 
 ## Install
 
