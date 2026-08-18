@@ -1,10 +1,10 @@
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
-import { clampOpenAIPromptCacheKey } from "@earendil-works/pi-ai/api/openai-prompt-cache";
-import {
-    convertResponsesMessages,
-    convertResponsesTools,
-} from "@earendil-works/pi-ai/api/openai-responses-shared";
 import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import {
+    clampOpenAIPromptCacheKeyFn,
+    convertResponsesMessagesFn,
+    convertResponsesToolsFn,
+} from "./pi-ai-api.ts";
 import { cacheAffinityEnabled } from "./config.ts";
 import { sanitizeContextMessages } from "./history.ts";
 
@@ -35,14 +35,14 @@ export function buildResponseCreate(
         type: "response.create",
         model: model.id,
         store: false,
-        input: convertResponsesMessages(
+        input: convertResponsesMessagesFn(
             model,
             sanitizeContextMessages(context),
             OPENAI_TOOL_CALL_PROVIDERS,
         ),
     };
     if (cacheAffinityEnabled(options?.cacheRetention)) {
-        const cacheKey = clampOpenAIPromptCacheKey(options?.sessionId);
+        const cacheKey = clampOpenAIPromptCacheKeyFn(options?.sessionId);
         if (cacheKey) {
             payload.prompt_cache_key = cacheKey;
         }
@@ -55,7 +55,7 @@ export function buildResponseCreate(
         payload.temperature = options.temperature;
     }
     if (tools.length > 0) {
-        payload.tools = convertResponsesTools(tools);
+        payload.tools = convertResponsesToolsFn(tools);
     }
 
     if (model.reasoning) {

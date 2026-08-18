@@ -5,7 +5,7 @@ import {
     type Model,
     type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { processResponsesStream } from "@earendil-works/pi-ai/api/openai-responses-shared";
+import { processResponsesStreamFn } from "./pi-ai-api.ts";
 import { resolveWsUrl } from "./config.ts";
 import { buildResponseCreate, resolveApiKey, upgradeHeaders } from "./payload.ts";
 import { iterateXaiWsEvents } from "./ws-events.ts";
@@ -46,7 +46,7 @@ export function streamXaiResponsesWs(
 
             stream.push({ type: "start", partial: output });
 
-            await processResponsesStream(
+            await processResponsesStreamFn(
                 iterateXaiWsEvents({
                     url: resolveWsUrl(model.baseUrl),
                     headers: upgradeHeaders(apiKey, options),
