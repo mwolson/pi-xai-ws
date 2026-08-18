@@ -65,15 +65,17 @@ export class SocketLiveness {
         }
         const now = this.now();
         const silentMs = now - this.lastInboundMs;
-        if (silentMs >= this.pingIntervalMs + this.livenessTimeoutMs) {
-            this.fail(
-                `xAI WebSocket silent for ${silentMs}ms (ping interval ${this.pingIntervalMs}ms, timeout ${this.livenessTimeoutMs}ms)`,
-            );
+        if (this.pingSentAtMs === null) {
+            if (silentMs >= this.pingIntervalMs) {
+                this.pingSentAtMs = now;
+                this.sendPing();
+            }
             return;
         }
-        if (this.pingSentAtMs === null && silentMs >= this.pingIntervalMs) {
-            this.pingSentAtMs = now;
-            this.sendPing();
+        if (now - this.pingSentAtMs >= this.livenessTimeoutMs) {
+            this.fail(
+                `xAI WebSocket silent for ${silentMs}ms after ping (timeout ${this.livenessTimeoutMs}ms)`,
+            );
         }
     }
 

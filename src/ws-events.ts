@@ -1,11 +1,15 @@
+import type { IncomingHttpHeaders } from "node:http";
 import WebSocket from "ws";
 import { resolveLivenessTimeoutMs, resolvePingIntervalMs } from "./config.ts";
 import { SocketLiveness } from "./liveness.ts";
+
+const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 
 const TERMINAL_TYPES = new Set([
     "response.completed",
     "response.incomplete",
     "response.failed",
+    "error",
 ]);
 
 export class XaiWsLivenessError extends Error {
@@ -22,7 +26,41 @@ export type OpenXaiEventsOptions = {
     signal?: AbortSignal;
     pingIntervalMs?: number;
     livenessTimeoutMs?: number;
+    connectTimeoutMs?: number;
+    onOpen?: (response: { status: number; headers: Record<string, string> }) => void | Promise<void>;
 };
+
+export function frameToUtf8(data: WebSocket.RawData): string {
+    if (typeof data === "string") {
+        return data;
+    }
+    if (Buffer.isBuffer(data)) {
+        return data.toString("utf8");
+    }
+    if (Array.isArray(data)) {
+        return Buffer.concat(data).toString("utf8");
+    }
+    return Buffer.from(data).toString("utf8");
+}
+
+export function isPlainEvent(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function isTerminalEventType(type: string): boolean {
+    return TERMINAL_TYPES.has(type);
+}
+
+function flattenHeaders(headers: IncomingHttpHeaders): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [name, value] of Object.entries(headers)) {
+        if (value === undefined) {
+            continue;
+        }
+        out[name] = Array.isArray(value) ? value.join(", ") : value;
+    }
+    return out;
+}
 
 function normalizeEvent(payload: Record<string, unknown>): Record<string, unknown> {
     if (payload.type === "error" && payload.message === undefined) {
@@ -39,11 +77,16 @@ function normalizeEvent(payload: Record<string, unknown>): Record<string, unknow
     return payload;
 }
 
+function isAbortError(error: Error | undefined): boolean {
+    return error?.name === "AbortError" || error?.message === "Request was aborted";
+}
+
 export async function* iterateXaiWsEvents(
     options: OpenXaiEventsOptions,
 ): AsyncGenerator<Record<string, unknown>> {
     const pingIntervalMs = options.pingIntervalMs ?? resolvePingIntervalMs();
     const livenessTimeoutMs = options.livenessTimeoutMs ?? resolveLivenessTimeoutMs();
+    const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
 
     let settle: (() => void) | undefined;
     const wait = () =>
@@ -58,8 +101,14 @@ export async function* iterateXaiWsEvents(
     const queue: Record<string, unknown>[] = [];
     let closed: Error | undefined;
     let finished = false;
+    let sawTerminal = false;
+    let upgradeStatus = 101;
+    let upgradeHeaders: Record<string, string> = {};
 
-    const ws = new WebSocket(options.url, { headers: options.headers, handshakeTimeout: 15_000 });
+    const ws = new WebSocket(options.url, {
+        headers: options.headers,
+        handshakeTimeout: connectTimeoutMs,
+    });
     const liveness = new SocketLiveness(
         () => {
             if (ws.readyState === WebSocket.OPEN) {
@@ -94,25 +143,37 @@ export async function* iterateXaiWsEvents(
         options.signal?.addEventListener("abort", onAbort, { once: true });
     }
 
+    ws.on("upgrade", (response) => {
+        upgradeStatus = response.statusCode ?? 101;
+        upgradeHeaders = flattenHeaders(response.headers);
+    });
+
     ws.once("open", () => {
-        try {
-            ws.send(JSON.stringify(options.createPayload));
-            liveness.start();
-        } catch (error) {
-            closed = error instanceof Error ? error : new Error(String(error));
-        }
-        wake();
+        void (async () => {
+            try {
+                await options.onOpen?.({ status: upgradeStatus, headers: upgradeHeaders });
+                ws.send(JSON.stringify(options.createPayload));
+                liveness.start();
+            } catch (error) {
+                closed = error instanceof Error ? error : new Error(String(error));
+            }
+            wake();
+        })();
     });
 
     ws.on("message", (data) => {
         liveness.noteInbound();
-        const text = typeof data === "string" ? data : data.toString("utf8");
         try {
-            const parsed = JSON.parse(text) as unknown;
-            if (parsed && typeof parsed === "object") {
-                queue.push(normalizeEvent(parsed as Record<string, unknown>));
-            } else {
+            const parsed = JSON.parse(frameToUtf8(data)) as unknown;
+            if (!isPlainEvent(parsed)) {
                 closed = new Error("xAI WebSocket sent a non-object frame");
+            } else {
+                const event = normalizeEvent(parsed);
+                const type = typeof event.type === "string" ? event.type : "";
+                if (isTerminalEventType(type)) {
+                    sawTerminal = true;
+                }
+                queue.push(event);
             }
         } catch {
             closed = new Error("xAI WebSocket sent invalid JSON");
@@ -136,7 +197,7 @@ export async function* iterateXaiWsEvents(
 
     ws.on("close", (code, reasonBuf) => {
         const reason = reasonBuf.toString("utf8");
-        if (!finished && closed === undefined) {
+        if (!finished && closed === undefined && !sawTerminal) {
             closed = new Error(
                 reason ? `xAI WebSocket closed (${code}): ${reason}` : `xAI WebSocket closed (${code})`,
             );
@@ -159,27 +220,23 @@ export async function* iterateXaiWsEvents(
 
     try {
         while (!finished) {
-            if (closed) {
+            if (isAbortError(closed)) {
                 throw closed;
             }
             if (queue.length > 0) {
                 const event = queue.shift()!;
                 const type = typeof event.type === "string" ? event.type : "";
                 yield event;
-                if (TERMINAL_TYPES.has(type)) {
-                    finished = true;
-                    break;
-                }
-                if (type === "error") {
+                if (isTerminalEventType(type)) {
                     finished = true;
                     break;
                 }
                 continue;
             }
+            if (closed) {
+                throw closed;
+            }
             await wait();
-        }
-        if (closed) {
-            throw closed;
         }
     } finally {
         cleanup();

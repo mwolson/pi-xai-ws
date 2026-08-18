@@ -48,10 +48,12 @@ export function streamXaiResponsesWs(
 
             await processResponsesStream(
                 iterateXaiWsEvents({
-                    url: resolveWsUrl(),
+                    url: resolveWsUrl(model.baseUrl),
                     headers: upgradeHeaders(apiKey, options),
                     createPayload: payload,
                     signal: options?.signal,
+                    connectTimeoutMs: options?.websocketConnectTimeoutMs,
+                    onOpen: (response) => options?.onResponse?.(response, model),
                 }),
                 output,
                 stream,

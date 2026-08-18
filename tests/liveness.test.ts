@@ -43,7 +43,41 @@ describe("SocketLiveness", () => {
         now += 1;
         live.tick();
         assert.equal(pings, 1);
-        assert.match(dead ?? "", /silent for 20000ms/);
+        assert.match(dead ?? "", /silent for 20000ms after ping/);
+    });
+
+    it("sends a ping before failing when the first tick jumps past the full budget", () => {
+        let now = 1_000;
+        let pings = 0;
+        let dead: string | undefined;
+
+        const live = new SocketLiveness(
+            () => {
+                pings += 1;
+            },
+            (reason) => {
+                dead = reason;
+            },
+            {
+                pingIntervalMs: 15_000,
+                livenessTimeoutMs: 5_000,
+                now: () => now,
+            },
+        );
+
+        now += 21_000;
+        live.tick();
+        assert.equal(pings, 1);
+        assert.equal(dead, undefined);
+
+        now += 4_999;
+        live.tick();
+        assert.equal(dead, undefined);
+
+        now += 1;
+        live.tick();
+        assert.equal(pings, 1);
+        assert.match(dead ?? "", /after ping/);
     });
 
     it("treats any inbound frame as a pong and does not fail during a write burst", () => {
@@ -125,7 +159,9 @@ describe("SocketLiveness", () => {
             },
         );
 
-        now += 2_000;
+        now += 1_000;
+        live.tick();
+        now += 1_000;
         live.tick();
         live.tick();
         live.noteInbound();

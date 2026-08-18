@@ -5,6 +5,8 @@ import {
     convertResponsesTools,
 } from "@earendil-works/pi-ai/api/openai-responses-shared";
 import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { cacheAffinityEnabled } from "./config.ts";
+import { sanitizeContextMessages } from "./history.ts";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 
@@ -33,9 +35,18 @@ export function buildResponseCreate(
         type: "response.create",
         model: model.id,
         store: false,
-        input: convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS),
-        prompt_cache_key: clampOpenAIPromptCacheKey(options?.sessionId),
+        input: convertResponsesMessages(
+            model,
+            sanitizeContextMessages(context),
+            OPENAI_TOOL_CALL_PROVIDERS,
+        ),
     };
+    if (cacheAffinityEnabled(options?.cacheRetention)) {
+        const cacheKey = clampOpenAIPromptCacheKey(options?.sessionId);
+        if (cacheKey) {
+            payload.prompt_cache_key = cacheKey;
+        }
+    }
 
     if (options?.maxTokens) {
         payload.max_output_tokens = options.maxTokens;
@@ -73,7 +84,7 @@ export function upgradeHeaders(apiKey: string, options?: SimpleStreamOptions): R
     const headers: Record<string, string> = {
         Authorization: `Bearer ${apiKey}`,
     };
-    if (options?.sessionId) {
+    if (cacheAffinityEnabled(options?.cacheRetention) && options?.sessionId) {
         headers["x-grok-conv-id"] = options.sessionId;
     }
     if (options?.headers) {
