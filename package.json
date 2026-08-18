@@ -1,0 +1,50 @@
+{
+  "name": "pi-xai-ws",
+  "version": "0.1.0",
+  "description": "Route Pi's built-in xAI Completions models over xAI Responses WebSocket with a ping-on-silence healthcheck.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Mike Olson",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mwolson/pi-xai-ws.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mwolson/pi-xai-ws/issues"
+  },
+  "homepage": "https://github.com/mwolson/pi-xai-ws#readme",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "xai",
+    "grok",
+    "websocket"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.4",
+    "@types/ws": "^8.18.1"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
