@@ -1,90 +1,91 @@
 # pi-xai-ws
 
-Pi's built-in `xai/grok-4.6` talks HTTP Chat Completions. That stream can sit on
-`api.x.ai:443` with no tokens after thinking ends. The OpenAI SDK timeout only
-covers fetch-until-headers, so the turn never fails.
+WebSocket transport for Pi's built-in xAI Completions models.
 
-This package intercepts Pi's `xai` Completions models and sends them over the
-official Responses WebSocket instead:
+`pi-xai-ws` intercepts `grok-4.6`, `grok-4.3`, and `grok-build-0.1` in Pi
+0.84.2 and sends their turns to xAI's official Responses WebSocket:
 
 `wss://api.x.ai/v1/responses`
 
-It reuses the same stored xAI API key or SuperGrok OAuth token Pi already has.
-
-The healthcheck fails a dead TCP session in about 20s. It does not add a
-no-tokens timer. If xAI's edge still answers RFC 6455 ping after the worker
-stops writing, the turn stays open. That case was not reproduced on this socket.
-
-## Healthcheck
-
-There is no JSON ping frame. The client event type is only `response.create`.
-
-The healthcheck is RFC 6455 ping, plus this rule: any inbound frame counts as
-liveness. A delayed pong during a write burst is fine, because the burst itself
-is traffic.
-
-1. Remember `last_inbound` on every data frame, pong, or server ping.
-2. After 15s of silence, send a protocol ping.
-3. If 5s later there is still no inbound frame, fail the turn and close the
-   socket.
-
-A live probe against `api.x.ai` on 2026-08-18 showed quiet-socket pongs in about
-75ms, and in-flight pongs delayed until the turn stopped writing (up to 9.6s)
-while deltas were still arriving. Counting those deltas as liveness is what
-keeps a healthy Grok turn alive.
-
-This can miss a wedge where the TLS session stays up and some edge still
-answers ping after the worker has died. That is a hope about xAI's wiring, not
-a guarantee. Do not treat install as a fix for the HTTP Completions hang until
-a wedged worker on this socket actually misses ping.
+It reuses the xAI API key or SuperGrok OAuth credentials already stored in Pi.
+`grok-4.5` stays on Pi's built-in HTTP Responses transport.
 
 ## Install
+
+Install from GitHub:
 
 ```sh
 pi install git:github.com/mwolson/pi-xai-ws
 ```
 
-Or a local checkout:
+Or install a local checkout:
 
 ```sh
 pi install /absolute/path/to/pi-xai-ws
 ```
 
-T3 Nightly re-adds `settings.json` packages around `pi --mode rpc --no-extensions`,
-so an installed copy is enough for `xai/grok-4.6`. Do not pass `models` in your
-own `registerProvider("xai")` or you will wipe the catalog.
+T3 Nightly re-adds packages from `settings.json` around
+`pi --mode rpc --no-extensions`, so installing the package is enough to enable
+it there.
 
-`grok-4.5` stays on built-in HTTP Responses. Only Completions models
-(`grok-4.6`, `grok-4.3`, `grok-build-0.1` in Pi 0.84.2) are intercepted.
+Passing `models` to another `registerProvider("xai")` call replaces Pi's model
+catalog. Omit `models` to keep the built-in xAI models available.
 
-Existing Completions threads keep working. Thinking signatures stored as field
-names (`reasoning_content`, and so on) are dropped for the Responses payload
-instead of crashing `JSON.parse`. Encrypted Completions `thoughtSignature` on
-tool calls is not replayed. After uninstall, start a new session. History this
-package wrote is Responses-shaped even though `api` stays `openai-completions`.
+## Healthcheck
 
-xAI closes a socket after 25 minutes. A single generate that long fails on the
-close. Each turn opens a new socket.
+Any inbound WebSocket frame counts as liveness, including data, pong, and server
+ping frames.
+
+1. After 15 seconds with no inbound frame, the extension sends an RFC 6455
+   protocol ping.
+2. If another 5 seconds pass after that ping with no inbound frame, the turn
+   fails and the extension closes the socket.
+
+The defaults are `15000` and `5000` milliseconds and can be changed with the
+environment variables below.
+
+A live probe on 2026-08-18 measured quiet-socket pongs at about 75 ms. During an
+active turn, pongs waited as long as 9.6 seconds for the turn to stop writing,
+while response deltas continued to arrive. Those deltas count as liveness.
+
+A live edge that still answers ping after its worker dies would keep the turn
+open.
 
 ## Settings
 
-| Variable | Default | Meaning |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `PI_XAI_WS_URL` | derived from `model.baseUrl`, else `wss://api.x.ai/v1/responses` | WebSocket URL. Required if `xai.baseUrl` is not `api.x.ai`, so a proxy token is not sent to public xAI |
-| `PI_XAI_WS_PING_INTERVAL_MS` | `15000` | Silence before a protocol ping |
-| `PI_XAI_WS_LIVENESS_TIMEOUT_MS` | `5000` | Extra silence after that ping before fail |
+| `PI_XAI_WS_URL` | Derived from `model.baseUrl`, otherwise `wss://api.x.ai/v1/responses` | WebSocket URL. Required when `xai.baseUrl` does not use `api.x.ai` so proxy credentials are not sent to public xAI. |
+| `PI_XAI_WS_PING_INTERVAL_MS` | `15000` | Inbound silence in milliseconds before a protocol ping. |
+| `PI_XAI_WS_LIVENESS_TIMEOUT_MS` | `5000` | Additional inbound silence in milliseconds after the ping before the turn fails. |
 
-`cacheRetention: "none"` omits `prompt_cache_key` and `x-grok-conv-id`.
+With `cacheRetention: "none"`, the extension omits `prompt_cache_key` and
+`x-grok-conv-id`.
 
-## Abort
+## Turn behavior
 
-T3 `{ "type": "abort" }` becomes Pi's `AbortSignal`. The socket is closed.
-A liveness failure is `stopReason: "error"`, not user abort, so Pi can retry.
+- Each turn opens a new socket. xAI closes a socket after 25 minutes, so a turn
+  still running at that point ends with the server close.
+- Aborts use Pi's `AbortSignal` and close the socket.
+- A liveness failure uses `stopReason: "error"` so Pi can retry the turn.
+- Steer waits until the current stream ends.
 
-Steer still waits until the stream ends. A dead socket that fails in ~20s is
-what lets the queued steer apply.
+## Thread history
 
-## Develop
+Existing Completions threads continue to work. Field-name thinking signatures
+such as `reasoning_content` are dropped from the Responses payload. Encrypted
+Completions `thoughtSignature` values on tool calls stay unused.
+
+History written by this package is Responses-shaped even though `api` remains
+`openai-completions`. Start a new session after uninstalling the package.
+
+## Development
+
+Load sibling `dist/api` files through `src/pi-ai-api.ts`. Direct imports of
+`@earendil-works/pi-ai/api/...` abort every Pi 0.84 session at startup, because
+jiti aliases `@earendil-works/pi-ai` to `dist/compat.js`.
+
+Run the test suite with:
 
 ```sh
 npm test
