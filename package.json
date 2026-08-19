@@ -1,6 +1,6 @@
 {
   "name": "@mwolson-org/pi-xai-ws",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Route Pi's built-in xAI Completions models over xAI Responses WebSocket with a ping-on-silence healthcheck.",
   "type": "module",
   "license": "MIT",
