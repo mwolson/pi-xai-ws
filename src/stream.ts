@@ -5,8 +5,9 @@ import {
     type Model,
     type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { processResponsesStreamFn } from "./pi-ai-api.ts";
 import { resolveWsUrl } from "./config.ts";
+import { normalizeXaiErrorMessage } from "./errors.ts";
+import { processResponsesStreamFn } from "./pi-ai-api.ts";
 import { buildResponseCreate, resolveApiKey, upgradeHeaders } from "./payload.ts";
 import { iterateXaiWsEvents } from "./ws-events.ts";
 
@@ -85,7 +86,8 @@ export function streamXaiResponsesWs(
             const aborted = options?.signal?.aborted === true ||
                 (error instanceof Error && (error.name === "AbortError" || error.message === "Request was aborted"));
             output.stopReason = aborted ? "aborted" : "error";
-            output.errorMessage = error instanceof Error ? error.message : String(error);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            output.errorMessage = normalizeXaiErrorMessage(errorMessage);
             stream.push({ type: "error", reason: output.stopReason, error: output });
             stream.end();
         }

@@ -72,7 +72,9 @@ With `cacheRetention: "none"`, the extension omits `prompt_cache_key` and
 - Each turn opens a new socket. xAI closes a socket after 25 minutes, so a turn
   still running at that point ends with the server close.
 - Aborts use Pi's `AbortSignal` and close the socket.
-- A liveness failure uses `stopReason: "error"` so Pi can retry the turn.
+- Liveness failures use `stopReason: "error"` so Pi can retry the turn.
+- Recognized xAI capacity errors retain the provider text and add Pi's retryable
+  `overloaded` marker. Pi continues to own retry budgets and backoff.
 - Steer waits until the current stream ends.
 
 ## Thread history
