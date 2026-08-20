@@ -114,12 +114,14 @@ describe("iterateXaiWsEvents", () => {
         await withWsServer(
             (socket) => {
                 socket.on("message", () => {
-                    socket.send(
-                        JSON.stringify({
-                            type: "response.created",
-                            response: { id: "resp_1" },
-                        }),
-                    );
+                    for (const index of [1, 2, 3]) {
+                        socket.send(
+                            JSON.stringify({
+                                type: "response.created",
+                                response: { id: `resp_${index}` },
+                            }),
+                        );
+                    }
                 });
             },
             async (url) => {
@@ -137,6 +139,62 @@ describe("iterateXaiWsEvents", () => {
                 }, /Request was aborted/);
             },
         );
+    });
+
+    it("normalizes a direct api_error envelope", async () => {
+        await withWsServer(
+            (socket) => {
+                socket.on("message", () => {
+                    socket.send(JSON.stringify({
+                        code: "overloaded",
+                        message: "capacity unavailable",
+                        type: "api_error",
+                    }));
+                });
+            },
+            async (url) => {
+                const events = await collect(url);
+                assert.deepEqual(events, [{
+                    code: "overloaded",
+                    message: "capacity unavailable",
+                    type: "error",
+                }]);
+            },
+        );
+    });
+
+    it("aborts safely after the WebSocket handshake starts", async () => {
+        const httpServer = createServer();
+        const sockets = new Set<{ destroy: () => void }>();
+        let upgradeSeen!: () => void;
+        const upgrade = new Promise<void>((resolve) => {
+            upgradeSeen = resolve;
+        });
+        httpServer.on("upgrade", (_request, socket) => {
+            sockets.add(socket);
+            socket.on("error", () => {});
+            upgradeSeen();
+        });
+        await new Promise<void>((resolve) => {
+            httpServer.listen(0, "127.0.0.1", resolve);
+        });
+        const address = httpServer.address();
+        assert.ok(address && typeof address !== "string");
+        const controller = new AbortController();
+        try {
+            const pending = collect(`ws://127.0.0.1:${address.port}`, {
+                signal: controller.signal,
+            });
+            await upgrade;
+            controller.abort();
+            await assert.rejects(pending, /Request was aborted/);
+            await new Promise<void>((resolve) => setImmediate(resolve));
+        } finally {
+            for (const socket of sockets) {
+                socket.destroy();
+            }
+            await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+        }
     });
 
     it("aborts while connecting", async () => {

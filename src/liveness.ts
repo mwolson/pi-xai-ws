@@ -1,5 +1,5 @@
 export const DEFAULT_PING_INTERVAL_MS = 15_000;
-export const DEFAULT_LIVENESS_TIMEOUT_MS = 10_000;
+export const DEFAULT_LIVENESS_TIMEOUT_MS = 60_000;
 
 export type SocketLivenessOptions = {
     pingIntervalMs?: number;
@@ -50,6 +50,7 @@ export class SocketLiveness {
         this.timer = setInterval(() => {
             this.tick();
         }, 250);
+        this.timer.unref?.();
     }
 
     stop(): void {

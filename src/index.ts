@@ -1,9 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerXaiProvider } from "./provider.ts";
 import { streamXaiResponsesWs } from "./stream.ts";
 
 export default function (pi: ExtensionAPI) {
-    pi.registerProvider("xai", {
-        api: "openai-completions",
-        streamSimple: streamXaiResponsesWs,
-    });
+    registerXaiProvider(pi, streamXaiResponsesWs);
 }

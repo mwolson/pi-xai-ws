@@ -23,7 +23,7 @@ describe("isResponsesThinkingSignature", () => {
 });
 
 describe("sanitizeContextMessages", () => {
-    it("strips Completions thinking signatures and keeps Responses ones", () => {
+    it("strips legacy thinking signatures and keeps Responses ones", () => {
         const responsesSignature = JSON.stringify({ type: "reasoning", id: "rs_1" });
         const context = {
             systemPrompt: "sys",
@@ -31,7 +31,7 @@ describe("sanitizeContextMessages", () => {
                 { role: "user", content: "hi" },
                 {
                     role: "assistant",
-                    api: "openai-completions",
+                    api: "openai-responses",
                     provider: "xai",
                     model: "grok-4.6",
                     content: [

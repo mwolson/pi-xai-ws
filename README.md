@@ -1,14 +1,19 @@
 # pi-xai-ws
 
-WebSocket transport for Pi's built-in xAI Completions models.
+WebSocket transport for Pi's built-in xAI models.
 
-`pi-xai-ws` intercepts supported Grok models in Pi and sends their turns to
-xAI's official Responses WebSocket at `wss://api.x.ai/v1/responses`. It reuses
-the xAI API key or SuperGrok OAuth credentials already stored in Pi.
+`pi-xai-ws` intercepts Responses-based Grok models in Pi and sends their turns
+to xAI's official Responses WebSocket at `wss://api.x.ai/v1/responses`. It
+reuses the SuperGrok OAuth credentials already stored in Pi, aiming for good
+performance and coherent caching.
+
+## Requirements
+
+`pi-xai-ws` requires Pi 0.84 or newer.
 
 ## Install
 
-`pi-xai-ws` requires Pi 0.84 or newer. Install it from npm:
+Install the package from npm:
 
 ```sh
 pi install npm:@mwolson-org/pi-xai-ws
@@ -33,67 +38,63 @@ Remove the package with:
 pi remove npm:@mwolson-org/pi-xai-ws
 ```
 
-Passing `models` to another `registerProvider("xai")` call replaces Pi's model
-catalog. Omit `models` to keep the built-in xAI models available.
-
-## Healthcheck
-
-Any inbound WebSocket frame counts as liveness, including data, pong, and server
-ping frames.
-
-1. After 15 seconds with no inbound frame, the extension sends an RFC 6455
-   protocol ping.
-2. If another 10 seconds pass after that ping with no inbound frame, the turn
-   fails and the extension closes the socket.
-
-The defaults are `15000` and `10000` milliseconds and can be changed with the
-environment variables below.
-
-A live probe on 2026-08-18 measured quiet-socket pongs at about 75 ms. During an
-active turn, pongs waited as long as 9.6 seconds for the turn to stop writing,
-while response deltas continued to arrive. Those deltas count as liveness.
-
-A live edge that still answers ping after its worker dies would keep the turn
-open.
-
 ## Settings
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `PI_XAI_WS_URL` | Derived from `model.baseUrl`, otherwise `wss://api.x.ai/v1/responses` | WebSocket URL. Required when `xai.baseUrl` does not use `api.x.ai` so proxy credentials are not sent to public xAI. |
-| `PI_XAI_WS_PING_INTERVAL_MS` | `15000` | Inbound silence in milliseconds before a protocol ping. |
-| `PI_XAI_WS_LIVENESS_TIMEOUT_MS` | `10000` | Additional inbound silence in milliseconds after the ping before the turn fails. |
+| Variable                        | Default                                                               | Description                                                                                                                                    |
+| ------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PI_XAI_WS_URL`                 | Derived from `model.baseUrl`, otherwise `wss://api.x.ai/v1/responses` | WebSocket URL. Set this when `xai.baseUrl` does not use `api.x.ai` so proxy credentials are not sent to public xAI.                            |
+| `PI_XAI_WS_PING_INTERVAL_MS`    | `15000`                                                               | Inbound silence in milliseconds before a protocol ping.                                                                                        |
+| `PI_XAI_WS_LIVENESS_TIMEOUT_MS` | `60000`                                                               | Additional inbound silence after the ping before the turn fails.                                                                               |
+| `PI_XAI_WS_IDLE_TIMEOUT_MS`     | `300000`                                                              | Idle milliseconds before a retained session socket closes.                                                                                     |
+| `PI_XAI_WS_MAX_AGE_MS`          | `1440000`                                                             | Maximum socket age. The default stays below xAI's 25-minute connection limit.                                                                  |
+| `PI_XAI_WS_DEBUG`               | unset                                                                 | Set to `1` for lifecycle, request-shape, and recovery diagnostics. Logs exclude request data, credentials, generated text, and tool arguments. |
 
 With `cacheRetention: "none"`, the extension omits `prompt_cache_key` and
 `x-grok-conv-id`.
 
-## Turn behavior
+## How it works
 
-- Each turn opens a new socket. xAI closes a socket after 25 minutes, so a turn
-  still running at that point ends with the server close.
-- Aborts use Pi's `AbortSignal` and close the socket.
-- Liveness failures use `stopReason: "error"` so Pi can retry the turn.
-- Recognized xAI capacity errors retain the provider text and add Pi's retryable
-  `overloaded` marker. Pi continues to own retry budgets and backoff.
-- Steer waits until the current stream ends.
+- A Pi session reuses one WebSocket and serializes model calls through it.
+- Every call sends Pi's complete local history with `store: false` and no
+  `previous_response_id`.
+- Encrypted Responses reasoning remains in local history and can be sent with
+  the next request.
+- The extension retains Pi's token limits, sampling options, payload hooks,
+  response hooks, tool behavior, and error projection.
+- Connect, socket, liveness, or xAI connection-limit failures may replay the
+  complete request once, but only before model output begins.
+- Protocol errors, local bound violations, aborts, disposal, and failures after
+  output begins never replay.
+- Sockets and request queues have fixed memory, age, and idle bounds.
 
-## Thread history
+See [Transport design](docs/transport.md) for payload construction, lifecycle,
+liveness, replay rules, resource bounds, and Pi integration details.
 
-Existing Completions threads continue to work. Field-name thinking signatures
-such as `reasoning_content` are dropped from the Responses payload. Encrypted
-Completions `thoughtSignature` values on tool calls stay unused.
+## Existing threads
 
-History written by this package is Responses-shaped even though `api` remains
-`openai-completions`. Start a new session after uninstalling the package.
+Existing threads continue to work. The extension drops legacy field-name
+thinking signatures such as `reasoning_content` from Responses requests while
+retaining encrypted reasoning produced by Responses models.
+
+History written by this package uses `api: "openai-responses"`. Start a new Pi
+session after uninstalling the package or switching the same model back to a
+Completions transport.
+
+## Documentation
+
+- [Transport design](docs/transport.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Development](docs/development.md)
+- [Release process](docs/releasing.md)
 
 ## Development
 
-Load sibling `dist/api` files through `src/pi-ai-api.ts`. Direct imports of
-`@earendil-works/pi-ai/api/...` abort every Pi session at startup, because
-jiti aliases `@earendil-works/pi-ai` to `dist/compat.js`.
-
-Run the test suite with:
+Run the package checks with:
 
 ```sh
 npm test
+npm run test:catalog
 ```
+
+See [Development](docs/development.md) for the source layout, compatibility
+imports, test strategy, and contribution rules.

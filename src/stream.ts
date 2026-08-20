@@ -8,11 +8,16 @@ import {
 import { resolveWsUrl } from "./config.ts";
 import { normalizeXaiErrorMessage } from "./errors.ts";
 import { processResponsesStreamFn } from "./pi-ai-api.ts";
-import { buildResponseCreate, resolveApiKey, upgradeHeaders } from "./payload.ts";
-import { iterateXaiWsEvents } from "./ws-events.ts";
+import {
+    buildResponseCreate,
+    prepareResponseOptions,
+    resolveApiKey,
+    upgradeHeaders,
+} from "./payload.ts";
+import { iterateXaiWsSessionEvents } from "./ws-events.ts";
 
 export function streamXaiResponsesWs(
-    model: Model,
+    model: Model<"openai-responses">,
     context: Context,
     options?: SimpleStreamOptions,
 ) {
@@ -39,29 +44,33 @@ export function streamXaiResponsesWs(
 
         try {
             const apiKey = resolveApiKey(options);
-            let payload = buildResponseCreate(model, context, options);
-            const nextPayload = await options?.onPayload?.(payload, model);
+            const preparedOptions = prepareResponseOptions(model, context, options, apiKey);
+            let payload = buildResponseCreate(model, context, preparedOptions);
+            const nextPayload = await preparedOptions.onPayload?.(payload, model);
             if (nextPayload !== undefined && nextPayload !== null && typeof nextPayload === "object") {
                 payload = nextPayload as Record<string, unknown>;
             }
+            payload = { ...payload, store: false };
 
             stream.push({ type: "start", partial: output });
 
+            const events = iterateXaiWsSessionEvents({
+                url: resolveWsUrl(model.baseUrl),
+                headers: upgradeHeaders(apiKey, preparedOptions),
+                createPayload: payload,
+                sessionId: preparedOptions.sessionId,
+                signal: preparedOptions.signal,
+                connectTimeoutMs: preparedOptions.websocketConnectTimeoutMs,
+                onOpen: (response) => preparedOptions.onResponse?.(response, model),
+            });
             await processResponsesStreamFn(
-                iterateXaiWsEvents({
-                    url: resolveWsUrl(model.baseUrl),
-                    headers: upgradeHeaders(apiKey, options),
-                    createPayload: payload,
-                    signal: options?.signal,
-                    connectTimeoutMs: options?.websocketConnectTimeoutMs,
-                    onOpen: (response) => options?.onResponse?.(response, model),
-                }),
+                events as Parameters<typeof processResponsesStreamFn>[0],
                 output,
                 stream,
                 model,
             );
 
-            if (options?.signal?.aborted) {
+            if (preparedOptions.signal?.aborted) {
                 throw new Error("Request was aborted");
             }
             if (output.stopReason === "pending") {

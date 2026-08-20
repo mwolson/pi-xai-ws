@@ -3,13 +3,13 @@ import { describe, it } from "node:test";
 import { DEFAULT_LIVENESS_TIMEOUT_MS, SocketLiveness } from "../src/liveness.ts";
 
 describe("SocketLiveness", () => {
-    it("defaults the post-ping timeout to 10 seconds", () => {
+    it("defaults the post-ping timeout to 60 seconds", () => {
         const live = new SocketLiveness(
             () => {},
             () => {},
         );
-        assert.equal(live.livenessTimeoutMs, 10_000);
-        assert.equal(DEFAULT_LIVENESS_TIMEOUT_MS, 10_000);
+        assert.equal(live.livenessTimeoutMs, 60_000);
+        assert.equal(DEFAULT_LIVENESS_TIMEOUT_MS, 60_000);
     });
 
     it("sends a ping after the quiet interval and fails if nothing returns", () => {

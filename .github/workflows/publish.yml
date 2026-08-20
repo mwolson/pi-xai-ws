@@ -33,6 +33,7 @@ jobs:
           fi
       - run: npm ci
       - run: npm test
+      - run: npm run test:catalog
 
   publish:
     name: Publish to npm

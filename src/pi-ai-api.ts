@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import type { clampOpenAIPromptCacheKey } from "@earendil-works/pi-ai/api/openai-prompt-cache";
+import type { buildBaseOptions } from "@earendil-works/pi-ai/api/simple-options";
 import type {
     convertResponsesMessages,
     convertResponsesTools,
@@ -29,6 +30,7 @@ function loadPiAiApiModule(name: string): Record<string, unknown> {
 
 const responsesShared = loadPiAiApiModule("openai-responses-shared");
 const promptCache = loadPiAiApiModule("openai-prompt-cache");
+const simpleOptions = loadPiAiApiModule("simple-options");
 
 export const processResponsesStreamFn = responsesShared[
     "processResponsesStream"
@@ -42,3 +44,4 @@ export const convertResponsesToolsFn = responsesShared[
 export const clampOpenAIPromptCacheKeyFn = promptCache[
     "clampOpenAIPromptCacheKey"
 ] as typeof clampOpenAIPromptCacheKey;
+export const buildBaseOptionsFn = simpleOptions["buildBaseOptions"] as typeof buildBaseOptions;

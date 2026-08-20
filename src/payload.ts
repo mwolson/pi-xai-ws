@@ -1,6 +1,8 @@
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
-import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { Context, Model, SimpleStreamOptions, StreamOptions } from "@earendil-works/pi-ai";
+import type { OpenAIResponsesOptions } from "@earendil-works/pi-ai/api/openai-responses";
 import {
+    buildBaseOptionsFn,
     clampOpenAIPromptCacheKeyFn,
     convertResponsesMessagesFn,
     convertResponsesToolsFn,
@@ -9,6 +11,7 @@ import { cacheAffinityEnabled } from "./config.ts";
 import { sanitizeContextMessages } from "./history.ts";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
+const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
 
 export function resolveApiKey(options?: SimpleStreamOptions): string {
     if (options?.apiKey) {
@@ -25,10 +28,26 @@ export function resolveApiKey(options?: SimpleStreamOptions): string {
     throw new Error("No API key for provider: xai");
 }
 
-export function buildResponseCreate(
-    model: Model,
+export function prepareResponseOptions(
+    model: Model<"openai-responses">,
     context: Context,
-    options?: SimpleStreamOptions,
+    options: SimpleStreamOptions | undefined,
+    apiKey: string,
+): OpenAIResponsesOptions {
+    const base = buildBaseOptionsFn(model, context, options, apiKey) as StreamOptions;
+    const clampedReasoning = options?.reasoning
+        ? clampThinkingLevel(model, options.reasoning)
+        : undefined;
+    return {
+        ...base,
+        reasoningEffort: clampedReasoning === "off" ? undefined : clampedReasoning,
+    };
+}
+
+export function buildResponseCreate(
+    model: Model<"openai-responses">,
+    context: Context,
+    options?: OpenAIResponsesOptions,
 ): Record<string, unknown> {
     const tools = context.tools ?? [];
     const payload: Record<string, unknown> = {
@@ -49,27 +68,35 @@ export function buildResponseCreate(
     }
 
     if (options?.maxTokens) {
-        payload.max_output_tokens = options.maxTokens;
+        payload.max_output_tokens = Math.max(options.maxTokens, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);
     }
     if (options?.temperature !== undefined) {
         payload.temperature = options.temperature;
     }
+    if (options?.serviceTier !== undefined) {
+        payload.service_tier = options.serviceTier;
+    }
     if (tools.length > 0) {
         payload.tools = convertResponsesToolsFn(tools);
+    }
+    if (options?.toolChoice !== undefined) {
+        payload.tool_choice = options.toolChoice;
     }
 
     if (model.reasoning) {
         payload.include = ["reasoning.encrypted_content"];
-        const requested = options?.reasoning;
-        if (requested && requested !== "off") {
-            const clamped = clampThinkingLevel(model, requested);
-            if (clamped !== "off") {
-                const mapped = model.thinkingLevelMap?.[clamped];
-                payload.reasoning = {
-                    effort: mapped ?? clamped,
-                    summary: "auto",
-                };
-            }
+        if (options?.reasoningEffort || options?.reasoningSummary) {
+            const effort = options.reasoningEffort
+                ? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
+                : "medium";
+            payload.reasoning = {
+                effort,
+                summary: options.reasoningSummary || "auto",
+            };
+        } else if (model.thinkingLevelMap?.off !== null) {
+            payload.reasoning = {
+                effort: model.thinkingLevelMap?.off ?? "none",
+            };
         }
     }
 
@@ -80,7 +107,7 @@ export function buildResponseCreate(
     return payload;
 }
 
-export function upgradeHeaders(apiKey: string, options?: SimpleStreamOptions): Record<string, string> {
+export function upgradeHeaders(apiKey: string, options?: StreamOptions): Record<string, string> {
     const headers: Record<string, string> = {
         Authorization: `Bearer ${apiKey}`,
     };

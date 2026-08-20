@@ -1,6 +1,8 @@
 import { DEFAULT_LIVENESS_TIMEOUT_MS, DEFAULT_PING_INTERVAL_MS } from "./liveness.ts";
 
 export const DEFAULT_WS_URL = "wss://api.x.ai/v1/responses";
+export const DEFAULT_WS_IDLE_TIMEOUT_MS = 5 * 60_000;
+export const DEFAULT_WS_MAX_AGE_MS = 24 * 60_000;
 
 function readPositiveInt(name: string, fallback: number): number {
     const raw = process.env[name];
@@ -56,4 +58,12 @@ export function resolvePingIntervalMs(): number {
 
 export function resolveLivenessTimeoutMs(): number {
     return readPositiveInt("PI_XAI_WS_LIVENESS_TIMEOUT_MS", DEFAULT_LIVENESS_TIMEOUT_MS);
+}
+
+export function resolveWsIdleTimeoutMs(): number {
+    return readPositiveInt("PI_XAI_WS_IDLE_TIMEOUT_MS", DEFAULT_WS_IDLE_TIMEOUT_MS);
+}
+
+export function resolveWsMaxAgeMs(): number {
+    return readPositiveInt("PI_XAI_WS_MAX_AGE_MS", DEFAULT_WS_MAX_AGE_MS);
 }
