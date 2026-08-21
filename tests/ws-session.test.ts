@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { Socket } from "node:net";
 import { describe, it } from "node:test";
 import { WebSocketServer, type WebSocket } from "ws";
 import { XaiWsSessionPool, type XaiWsSessionEventsOptions } from "../src/ws-events.ts";
@@ -133,6 +134,27 @@ describe("XaiWsSessionPool", () => {
             assert.equal(harness.requests[1]?.payload.prompt_cache_key, "cache-key");
             assert.equal(pool.inspect().counters.fullRequests, 2);
         } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("enables TCP keepalive on the WebSocket transport", async () => {
+        const input = [{ role: "user", text: "keepalive" }];
+        const harness = await createHarness((socket) => completed(socket, "response-1"));
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        const originalSetKeepAlive = Socket.prototype.setKeepAlive;
+        const calls: Array<{ enable: boolean | undefined; initialDelay: number | undefined }> = [];
+        Socket.prototype.setKeepAlive = function setKeepAlive(enable, initialDelay) {
+            calls.push({ enable, initialDelay });
+            return originalSetKeepAlive.call(this, enable, initialDelay);
+        };
+        try {
+            await collect(pool, requestOptions(harness.url, input));
+
+            assert.ok(calls.some((call) => call.enable === true && call.initialDelay === 15_000));
+        } finally {
+            Socket.prototype.setKeepAlive = originalSetKeepAlive;
             pool.closeAll();
             await harness.close();
         }
@@ -726,6 +748,604 @@ describe("XaiWsSessionPool", () => {
 
             assert.equal(harness.connectionCount(), 2);
             assert.equal(harness.requests[1]?.payload.previous_response_id, undefined);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+});
+
+describe("XaiWsSessionPool stored-response continuation", () => {
+    function storedOptions(
+        url: string,
+        input: unknown[],
+        projectedOutput: readonly unknown[],
+        sessionId = "session-a",
+        overrides: Record<string, unknown> = {},
+    ): XaiWsSessionEventsOptions {
+        return {
+            ...requestOptions(url, input, sessionId, { store: true, ...overrides }),
+            projectStoredOutput: () => projectedOutput,
+            storeResponses: true,
+        };
+    }
+
+    it("is off by default even when the payload asks for storage", async () => {
+        const input = [{ role: "user", text: "private" }];
+        const harness = await createHarness((socket) => completed(socket, "response-1"));
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, requestOptions(harness.url, input, "session-a", { store: true }));
+
+            assert.equal(harness.requests[0]?.payload.store, false);
+            assert.equal(harness.requests[0]?.payload.previous_response_id, undefined);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("does not store a request without a reusable Pi session id", async () => {
+        const input = [{ role: "user", text: "request owned" }];
+        const harness = await createHarness((socket) => completed(socket, "response-1"));
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            const options = storedOptions(harness.url, input, []);
+            options.sessionId = undefined;
+            await collect(pool, options);
+
+            assert.equal(harness.requests[0]?.payload.store, false);
+            assert.equal(harness.requests[0]?.payload.previous_response_id, undefined);
+            assert.deepEqual(harness.requests[0]?.payload.input, input);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("sends full context once, then only new items with the response reference", async () => {
+        const firstInput = [{ role: "user", text: "first" }];
+        const firstOutput = [{ role: "assistant", text: "answer" }];
+        const secondInput = [...firstInput, ...firstOutput, { role: "user", text: "second" }];
+        const secondOutput = [{ role: "assistant", text: "another answer" }];
+        const thirdInput = [...secondInput, ...secondOutput, { role: "user", text: "third" }];
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            completed(socket, `response-${requestNumber}`);
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, firstOutput));
+            await collect(pool, storedOptions(harness.url, secondInput, secondOutput));
+            await collect(pool, storedOptions(harness.url, thirdInput, []));
+
+            assert.equal(harness.connectionCount(), 1);
+            assert.deepEqual(harness.requests[0]?.payload.input, firstInput);
+            assert.equal(harness.requests[0]?.payload.store, true);
+            assert.equal(harness.requests[0]?.payload.previous_response_id, undefined);
+            assert.deepEqual(harness.requests[1]?.payload.input, [{ role: "user", text: "second" }]);
+            assert.equal(harness.requests[1]?.payload.previous_response_id, "response-1");
+            assert.deepEqual(harness.requests[2]?.payload.input, [{ role: "user", text: "third" }]);
+            assert.equal(harness.requests[2]?.payload.previous_response_id, "response-2");
+            assert.equal(pool.inspect().counters.continuedRequests, 2);
+            assert.equal(pool.inspect().counters.fullRequests, 1);
+            assert.equal(pool.inspect().counters.continuationFallbacks, 0);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("recovers from a repeated socket-local response id using the durable checkpoint suffix", async () => {
+        const firstInput = [{ role: "user", text: "first" }];
+        const firstOutput = [{ type: "function_call", call_id: "call-1", name: "tool" }];
+        const firstToolResult = { type: "function_call_output", call_id: "call-1", output: "one" };
+        const secondInput = [...firstInput, ...firstOutput, firstToolResult];
+        const secondOutput = [{ type: "function_call", call_id: "call-2", name: "tool" }];
+        const secondToolResult = { type: "function_call_output", call_id: "call-2", output: "two" };
+        const thirdInput = [...secondInput, ...secondOutput, secondToolResult];
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            if (requestNumber === 3) {
+                socket.close(1011, "before output");
+            } else {
+                completed(socket, requestNumber < 4 ? "response-repeated" : "response-recovered");
+            }
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, firstOutput));
+            await collect(pool, storedOptions(harness.url, secondInput, secondOutput));
+            await collect(pool, storedOptions(harness.url, thirdInput, []));
+
+            assert.equal(harness.connectionCount(), 2);
+            assert.equal(harness.requests.length, 4);
+            assert.deepEqual(harness.requests[1]?.payload.input, [firstToolResult]);
+            assert.deepEqual(harness.requests[2]?.payload.input, [secondToolResult]);
+            assert.equal(harness.requests[2]?.payload.previous_response_id, "response-repeated");
+            assert.deepEqual(harness.requests[3]?.payload.input, [
+                firstToolResult,
+                ...secondOutput,
+                secondToolResult,
+            ]);
+            assert.equal(harness.requests[3]?.payload.previous_response_id, "response-repeated");
+            assert.equal(pool.inspect().counters.preOutputReplays, 1);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("keeps the first safe checkpoint through response ID cycles and socket boundaries", async () => {
+        const user1 = { role: "user", text: "U1" };
+        const assistant1 = { role: "assistant", text: "A1" };
+        const user2 = { role: "user", text: "U2" };
+        const assistant2 = { role: "assistant", text: "A2" };
+        const user3 = { role: "user", text: "U3" };
+        const assistant3 = { role: "assistant", text: "A3" };
+        const user4 = { role: "user", text: "U4" };
+        const assistant4 = { role: "assistant", text: "A4" };
+        const user5 = { role: "user", text: "U5" };
+        const assistant5 = { role: "assistant", text: "A5" };
+        const user6 = { role: "user", text: "U6" };
+        const assistant6 = { role: "assistant", text: "A6" };
+        const user7 = { role: "user", text: "U7" };
+        const input1 = [user1];
+        const input2 = [...input1, assistant1, user2];
+        const input3 = [...input2, assistant2, user3];
+        const input4 = [...input3, assistant3, user4];
+        const input5 = [...input4, assistant4, user5];
+        const input6 = [...input5, assistant5, user6];
+        const input7 = [...input6, assistant6, user7];
+        const responseIds = new Map([
+            [1, "response-a"],
+            [2, "response-b"],
+            [3, "response-a"],
+            [5, "response-c"],
+            [6, "response-d"],
+            [7, "response-c"],
+            [9, "response-e"],
+        ]);
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            if (requestNumber === 4 || requestNumber === 8) {
+                socket.close(1011, "before output");
+                return;
+            }
+            completed(socket, responseIds.get(requestNumber)!);
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, input1, [assistant1]));
+            await collect(pool, storedOptions(harness.url, input2, [assistant2]));
+            await collect(pool, storedOptions(harness.url, input3, [assistant3]));
+            await collect(pool, storedOptions(harness.url, input4, [assistant4]));
+            await collect(pool, storedOptions(harness.url, input5, [assistant5]));
+            await collect(pool, storedOptions(harness.url, input6, [assistant6]));
+            await collect(pool, storedOptions(harness.url, input7, []));
+
+            assert.equal(harness.connectionCount(), 3);
+            assert.equal(harness.requests.length, 9);
+            assert.equal(harness.requests[2]?.payload.previous_response_id, "response-b");
+            assert.deepEqual(harness.requests[2]?.payload.input, [user3]);
+            assert.equal(harness.requests[3]?.payload.previous_response_id, "response-a");
+            assert.deepEqual(harness.requests[3]?.payload.input, [user4]);
+            assert.equal(harness.requests[4]?.payload.previous_response_id, "response-a");
+            assert.deepEqual(harness.requests[4]?.payload.input, [
+                user2,
+                assistant2,
+                user3,
+                assistant3,
+                user4,
+            ]);
+            assert.equal(harness.requests[7]?.payload.previous_response_id, "response-c");
+            assert.deepEqual(harness.requests[7]?.payload.input, [user7]);
+            assert.equal(harness.requests[8]?.payload.previous_response_id, "response-c");
+            assert.deepEqual(harness.requests[8]?.payload.input, [
+                user5,
+                assistant5,
+                user6,
+                assistant6,
+                user7,
+            ]);
+            assert.equal(pool.inspect().counters.preOutputReplays, 2);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("retains the safe checkpoint when a later stored terminal closes immediately", async () => {
+        const user1 = { role: "user", text: "U1" };
+        const assistant1 = { role: "assistant", text: "A1" };
+        const user2 = { role: "user", text: "U2" };
+        const assistant2 = { role: "assistant", text: "A2" };
+        const user3 = { role: "user", text: "U3" };
+        const assistant3 = { role: "assistant", text: "A3" };
+        const user4 = { role: "user", text: "U4" };
+        const input1 = [user1];
+        const input2 = [...input1, assistant1, user2];
+        const input3 = [...input2, assistant2, user3];
+        const input4 = [...input3, assistant3, user4];
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            const responseId = requestNumber === 1 ? "response-a" : "response-b";
+            completed(socket, responseId);
+            if (requestNumber === 3) {
+                socket.close(1000, "done");
+            }
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, input1, [assistant1]));
+            await collect(pool, storedOptions(harness.url, input2, [assistant2]));
+            await collect(pool, storedOptions(harness.url, input3, [assistant3]));
+            await wait(10);
+            await collect(pool, storedOptions(harness.url, input4, []));
+
+            assert.equal(harness.connectionCount(), 2);
+            assert.equal(harness.requests[3]?.payload.previous_response_id, "response-a");
+            assert.deepEqual(harness.requests[3]?.payload.input, [
+                user2,
+                assistant2,
+                user3,
+                assistant3,
+                user4,
+            ]);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("uses Pi's projected output instead of counting server-only response items", async () => {
+        const firstInput = [{ role: "user", text: "first" }];
+        const projectedOutput = [
+            { type: "reasoning", encrypted_content: "blob" },
+            { type: "message", text: "answer" },
+        ];
+        const secondInput = [...firstInput, ...projectedOutput, { role: "user", text: "second" }];
+        const serverOutput = [
+            { type: "reasoning", summary: [] },
+            { type: "web_search_call", status: "completed" },
+            { type: "message", status: "completed" },
+        ];
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            if (requestNumber === 1) {
+                socket.send(JSON.stringify({
+                    response: { id: "response-1", output: serverOutput, status: "completed" },
+                    type: "response.completed",
+                }));
+            } else {
+                completed(socket, "response-2");
+            }
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, projectedOutput));
+            await collect(pool, storedOptions(harness.url, secondInput, []));
+
+            assert.equal(harness.requests[1]?.payload.previous_response_id, "response-1");
+            assert.deepEqual(harness.requests[1]?.payload.input, [{ role: "user", text: "second" }]);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("advances the chain from an incomplete response", async () => {
+        const firstInput = [{ role: "user", text: "first" }];
+        const secondInput = [
+            ...firstInput,
+            { type: "message", text: "partial answer" },
+            { role: "user", text: "second" },
+        ];
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            if (requestNumber === 1) {
+                socket.send(JSON.stringify({
+                    response: {
+                        id: "response-partial",
+                        output: [{ type: "message" }],
+                        status: "incomplete",
+                    },
+                    type: "response.incomplete",
+                }));
+            } else {
+                completed(socket, "response-2");
+            }
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, [{ type: "message", text: "partial answer" }]));
+            await collect(pool, storedOptions(harness.url, secondInput, []));
+
+            assert.equal(harness.requests[1]?.payload.previous_response_id, "response-partial");
+            assert.deepEqual(harness.requests[1]?.payload.input, [{ role: "user", text: "second" }]);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("clears the chain when a stored request ends without a reusable terminal", async () => {
+        const firstInput = [{ role: "user", text: "first" }];
+        const firstOutput = [{ role: "assistant", text: "answer" }];
+        const secondInput = [...firstInput, ...firstOutput, { role: "user", text: "second" }];
+        const thirdInput = [
+            ...secondInput,
+            { role: "assistant", text: "failed partial answer" },
+            { role: "user", text: "third" },
+        ];
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            if (requestNumber === 2) {
+                socket.send(JSON.stringify({
+                    response: { id: "response-failed", status: "failed" },
+                    type: "response.failed",
+                }));
+            } else {
+                completed(socket, `response-${requestNumber}`);
+            }
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, firstOutput));
+            await collect(pool, storedOptions(harness.url, secondInput, []));
+            await collect(pool, storedOptions(harness.url, thirdInput, []));
+
+            assert.equal(harness.requests[1]?.payload.previous_response_id, "response-1");
+            assert.equal(harness.requests[2]?.payload.previous_response_id, undefined);
+            assert.deepEqual(harness.requests[2]?.payload.input, thirdInput);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("retries full context without the reference when xAI rejects it", async () => {
+        const firstInput = [{ role: "user", text: "first" }];
+        const secondInput = [
+            ...firstInput,
+            { role: "assistant", text: "answer" },
+            { role: "user", text: "second" },
+        ];
+        const harness = await createHarness((socket, payload, requestNumber) => {
+            if (requestNumber === 2 && typeof payload.previous_response_id === "string") {
+                socket.send(JSON.stringify({
+                    error: {
+                        code: "invalid_request_error",
+                        message: "Invalid parameter.",
+                        param: "previous_response_id",
+                    },
+                    type: "api_error",
+                }));
+            } else {
+                completed(socket, `response-${requestNumber}`);
+            }
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, [{ role: "assistant", text: "answer" }]));
+            await collect(pool, storedOptions(harness.url, secondInput, []));
+
+            assert.equal(harness.connectionCount(), 2);
+            assert.equal(harness.requests.length, 3);
+            assert.deepEqual(harness.requests[2]?.payload.input, secondInput);
+            assert.equal(harness.requests[2]?.payload.previous_response_id, undefined);
+            assert.equal(harness.requests[2]?.payload.store, true);
+            assert.equal(pool.inspect().counters.continuationFallbacks, 1);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("forgets a missing live xAI response id and retries full context once", async () => {
+        const firstInput = [{ role: "user", text: "first" }];
+        const firstOutput = [{ role: "assistant", text: "answer" }];
+        const secondInput = [...firstInput, ...firstOutput, { role: "user", text: "second" }];
+        const harness = await createHarness((socket, payload, requestNumber) => {
+            if (requestNumber === 2 && typeof payload.previous_response_id === "string") {
+                socket.send(JSON.stringify({
+                    message: `gRPC error: Response with id=${payload.previous_response_id} not found`,
+                }));
+            } else {
+                completed(socket, `response-${requestNumber}`);
+            }
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, firstOutput));
+            await collect(pool, storedOptions(harness.url, secondInput, []));
+
+            assert.equal(harness.connectionCount(), 2);
+            assert.equal(harness.requests.length, 3);
+            assert.equal(harness.requests[1]?.payload.previous_response_id, "response-1");
+            assert.equal(harness.requests[2]?.payload.previous_response_id, undefined);
+            assert.deepEqual(harness.requests[2]?.payload.input, secondInput);
+            assert.equal(pool.inspect().counters.continuationFallbacks, 1);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("still falls back to full context after a connection-limit replay", async () => {
+        const firstInput = [{ role: "user", text: "first" }];
+        const firstOutput = [{ role: "assistant", text: "answer" }];
+        const secondInput = [...firstInput, ...firstOutput, { role: "user", text: "second" }];
+        const harness = await createHarness((socket, payload, requestNumber) => {
+            if (requestNumber === 2) {
+                socket.send(JSON.stringify({
+                    code: "websocket_connection_limit_reached",
+                    message: "connection limit reached",
+                    type: "error",
+                }));
+            } else if (requestNumber === 3 && typeof payload.previous_response_id === "string") {
+                socket.send(JSON.stringify({
+                    code: "previous_response_not_found",
+                    message: "Previous response id was not found.",
+                    type: "error",
+                }));
+            } else {
+                completed(socket, `response-${requestNumber}`);
+            }
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, firstOutput));
+            await collect(pool, storedOptions(harness.url, secondInput, []));
+
+            assert.equal(harness.connectionCount(), 3);
+            assert.equal(harness.requests.length, 4);
+            assert.equal(harness.requests[1]?.payload.previous_response_id, "response-1");
+            assert.equal(harness.requests[2]?.payload.previous_response_id, "response-1");
+            assert.equal(harness.requests[3]?.payload.previous_response_id, undefined);
+            assert.deepEqual(harness.requests[3]?.payload.input, secondInput);
+            assert.equal(pool.inspect().counters.preOutputReplays, 1);
+            assert.equal(pool.inspect().counters.continuationFallbacks, 1);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("does not replenish the transport replay after a reference fallback", async () => {
+        const firstInput = [{ role: "user", text: "first" }];
+        const firstOutput = [{ role: "assistant", text: "answer" }];
+        const secondInput = [...firstInput, ...firstOutput, { role: "user", text: "second" }];
+        const harness = await createHarness((socket, payload, requestNumber) => {
+            if (requestNumber === 2) {
+                socket.send(JSON.stringify({
+                    code: "websocket_connection_limit_reached",
+                    message: "connection limit reached",
+                    type: "error",
+                }));
+            } else if (requestNumber === 3 && typeof payload.previous_response_id === "string") {
+                socket.send(JSON.stringify({
+                    message: `gRPC error: Response with id=${payload.previous_response_id} not found`,
+                }));
+            } else if (requestNumber === 4) {
+                socket.close(1011, "before output");
+            } else {
+                completed(socket, `response-${requestNumber}`);
+            }
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, firstOutput));
+            await assert.rejects(
+                () => collect(pool, storedOptions(harness.url, secondInput, [])),
+                /closed/i,
+            );
+
+            assert.equal(harness.connectionCount(), 3);
+            assert.equal(harness.requests.length, 4);
+            assert.equal(harness.requests[2]?.payload.previous_response_id, "response-1");
+            assert.equal(harness.requests[3]?.payload.previous_response_id, undefined);
+            assert.deepEqual(harness.requests[3]?.payload.input, secondInput);
+            assert.equal(pool.inspect().counters.preOutputReplays, 1);
+            assert.equal(pool.inspect().counters.continuationFallbacks, 1);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("falls back to full context once when history was rewritten", async () => {
+        const firstInput = [{ role: "user", text: "original" }];
+        const compactedInput = [
+            { role: "user", text: "summary of earlier context" },
+            { role: "user", text: "second" },
+        ];
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            completed(socket, `response-${requestNumber}`);
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, [{ role: "assistant", text: "original answer" }]));
+            await collect(pool, storedOptions(harness.url, compactedInput, [{ role: "assistant", text: "ok" }]));
+
+            assert.deepEqual(harness.requests[1]?.payload.input, compactedInput);
+            assert.equal(harness.requests[1]?.payload.previous_response_id, undefined);
+            assert.equal(pool.inspect().counters.continuationFallbacks, 1);
+
+            const thirdInput = [...compactedInput, { role: "assistant", text: "ok" }, { role: "user", text: "third" }];
+            await collect(pool, storedOptions(harness.url, thirdInput, []));
+            assert.deepEqual(harness.requests[2]?.payload.input, [{ role: "user", text: "third" }]);
+            assert.equal(harness.requests[2]?.payload.previous_response_id, "response-2");
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("clears the chain when the transport identity changes", async () => {
+        const firstInput = [{ role: "user", text: "first" }];
+        const firstOutput = [{ role: "assistant", text: "answer" }];
+        const secondInput = [...firstInput, ...firstOutput, { role: "user", text: "second" }];
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            completed(socket, `response-${requestNumber}`);
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, firstOutput));
+            const changed = storedOptions(harness.url, secondInput, []);
+            changed.headers = { ...changed.headers, Authorization: "Bearer another-account" };
+            await collect(pool, changed);
+
+            assert.equal(harness.connectionCount(), 2);
+            assert.equal(harness.requests[1]?.payload.previous_response_id, undefined);
+            assert.deepEqual(harness.requests[1]?.payload.input, secondInput);
+            assert.equal(pool.inspect().counters.continuationFallbacks, 1);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("discards stored checkpoints when an idle session is evicted", async () => {
+        const firstInput = [{ role: "user", text: "first" }];
+        const firstOutput = [{ role: "assistant", text: "answer" }];
+        const secondInput = [...firstInput, ...firstOutput, { role: "user", text: "second" }];
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            completed(socket, `response-${requestNumber}`);
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 20, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, firstOutput));
+            await wait(60);
+            await collect(pool, storedOptions(harness.url, secondInput, []));
+
+            assert.equal(harness.connectionCount(), 2);
+            assert.equal(harness.requests[1]?.payload.previous_response_id, undefined);
+            assert.deepEqual(harness.requests[1]?.payload.input, secondInput);
+            assert.equal(pool.inspect().counters.idleCleanups, 1);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("replans from the durable checkpoint after age rotation with repeated IDs", async () => {
+        const user1 = { role: "user", text: "U1" };
+        const assistant1 = { role: "assistant", text: "A1" };
+        const user2 = { role: "user", text: "U2" };
+        const assistant2 = { role: "assistant", text: "A2" };
+        const user3 = { role: "user", text: "U3" };
+        const input1 = [user1];
+        const input2 = [...input1, assistant1, user2];
+        const input3 = [...input2, assistant2, user3];
+        const harness = await createHarness((socket) => {
+            completed(socket, "response-repeated");
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 25 });
+        try {
+            await collect(pool, storedOptions(harness.url, input1, [assistant1]));
+            await collect(pool, storedOptions(harness.url, input2, [assistant2]));
+            await wait(60);
+            await collect(pool, storedOptions(harness.url, input3, []));
+
+            assert.equal(harness.connectionCount(), 2);
+            assert.equal(pool.inspect().counters.rotations, 1);
+            assert.equal(harness.requests[2]?.connection, 2);
+            assert.deepEqual(harness.requests[2]?.payload.input, [user2, assistant2, user3]);
+            assert.equal(harness.requests[2]?.payload.previous_response_id, "response-repeated");
         } finally {
             pool.closeAll();
             await harness.close();

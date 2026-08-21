@@ -88,10 +88,27 @@ Verify these facts:
 - The second wire request has more input items than the first.
 - Pi history grows by one user and one assistant message per turn.
 - No unexpected replay or connection-limit recovery occurs.
-- No payload uses `store: true` or `previous_response_id`.
+- With `PI_XAI_WS_STORE=0`, no payload uses `store: true` or
+  `previous_response_id`, even when the global package config enables it.
 
 Generated wording is not a useful assertion. Record counts and request shape
 instead.
+
+When validating the opt-in stored-response mode, set `storeResponses: true` in
+`getAgentDir()/pi-xai-ws.json`, leave `PI_XAI_WS_STORE` unset, and run a separate
+multi-turn probe with a nonempty Pi session ID and `PI_XAI_WS_DEBUG=1`. Require
+one `mode=full` first request and same-socket `mode=continue` follow-ups
+containing only new input items. This verifies the package-owned config path,
+not just the environment override.
+
+Also rotate the socket after two successful tool-call responses that share one
+xAI response ID. Verify that the replacement-socket request uses the durable
+checkpoint plus the projected tool and assistant items since that checkpoint,
+then completes without repeating a tool call. Confirm the package regression
+also covers response IDs cycling `A`, `B`, `A` before rotation and through a
+second socket boundary. In a separate probe, corrupt one
+`previous_response_id` and verify that the live `Response with id=... not found`
+error causes exactly one full-context fallback with no continuation reference.
 
 ## 5. Review the final package diff
 
@@ -106,8 +123,9 @@ explicitly:
 - Peer and packaged-file declarations
 - README and detailed documentation
 
-Transport changes benefit from an independent review because a replay bug can
-duplicate remote model work without corrupting local state.
+Transport changes benefit from an independent review because an incorrect
+socket-local or durable checkpoint can duplicate remote model work without
+corrupting local state.
 
 ## 6. Commit and tag
 

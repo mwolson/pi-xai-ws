@@ -45,27 +45,56 @@ pi remove npm:@mwolson-org/pi-xai-ws
 | `PI_XAI_WS_URL`                 | Derived from `model.baseUrl`, otherwise `wss://api.x.ai/v1/responses` | WebSocket URL. Set this when `xai.baseUrl` does not use `api.x.ai` so proxy credentials are not sent to public xAI.                            |
 | `PI_XAI_WS_PING_INTERVAL_MS`    | `15000`                                                               | Inbound silence in milliseconds before a protocol ping.                                                                                        |
 | `PI_XAI_WS_LIVENESS_TIMEOUT_MS` | `60000`                                                               | Additional inbound silence after the ping before the turn fails.                                                                               |
-| `PI_XAI_WS_IDLE_TIMEOUT_MS`     | `300000`                                                              | Idle milliseconds before a retained session socket closes.                                                                                     |
+| `PI_XAI_WS_IDLE_TIMEOUT_MS`     | `300000`                                                              | Idle milliseconds before the retained socket, session entry, and in-memory continuation checkpoints are discarded.                              |
 | `PI_XAI_WS_MAX_AGE_MS`          | `1440000`                                                             | Maximum socket age. The default stays below xAI's 25-minute connection limit.                                                                  |
+| `PI_XAI_WS_STORE`               | unset                                                                 | Override stored-response continuation. `1` or `true` enables it; any other defined value disables it.                                                     |
 | `PI_XAI_WS_DEBUG`               | unset                                                                 | Set to `1` for lifecycle, request-shape, and recovery diagnostics. Logs exclude request data, credentials, generated text, and tool arguments. |
 
 With `cacheRetention: "none"`, the extension omits `prompt_cache_key` and
 `x-grok-conv-id`.
 
+### Global package config
+
+Pi extensions conventionally keep global package configuration under the Pi
+agent directory. Enable stored-response continuation for every Pi process using
+this agent directory by creating `~/.pi/agent/pi-xai-ws.json`:
+
+```json
+{
+  "storeResponses": true
+}
+```
+
+The package resolves the directory through Pi's `getAgentDir()`, so
+`PI_CODING_AGENT_DIR` and embedded Pi runtimes continue to work. The environment
+variable `PI_XAI_WS_STORE` takes precedence when it is defined, including
+`PI_XAI_WS_STORE=0` to force storage off. Project-local configuration is not
+supported because a repository must not opt users into server-side retention.
+A missing, malformed, unreadable, or non-boolean config remains safely off.
+
 ## How it works
 
 - A Pi session reuses one WebSocket and serializes model calls through it.
-- Every call sends Pi's complete local history with `store: false` and no
-  `previous_response_id`.
+- By default every call sends Pi's complete local history with `store: false`
+  and no `previous_response_id`.
+- With `storeResponses: true` in the global package config, or
+  `PI_XAI_WS_STORE=1`, and a nonempty Pi session ID, calls use `store: true` and
+  `previous_response_id` continuation. Same-socket calls send only the
+  newest items. After reconnecting, the request resumes from the latest durable
+  response checkpoint and includes every locally recorded item since it. Calls
+  without a session ID remain `store: false`. See
+  [Stored-response continuation](docs/transport.md#stored-response-continuation).
 - Encrypted Responses reasoning remains in local history and can be sent with
   the next request.
 - The extension retains Pi's token limits, sampling options, payload hooks,
   response hooks, tool behavior, and error projection.
-- Connect, socket, liveness, or xAI connection-limit failures may replay the
-  complete request once, but only before model output begins.
+- Connect, socket, liveness, or xAI connection-limit failures may retry once
+  before model output begins. Stored continuation rebuilds that retry from its
+  durable checkpoint rather than assuming a repeated socket-local response ID
+  identifies the latest state on a replacement socket.
 - Protocol errors, local bound violations, aborts, disposal, and failures after
   output begins never replay.
-- Sockets and request queues have fixed memory, age, and idle bounds.
+- Sockets enable TCP keepalive and have fixed memory, age, and idle bounds.
 
 See [Transport design](docs/transport.md) for payload construction, lifecycle,
 liveness, replay rules, resource bounds, and Pi integration details.

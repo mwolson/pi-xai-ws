@@ -5,12 +5,13 @@ import {
     type Model,
     type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { resolveWsUrl } from "./config.ts";
+import { resolveWsUrl, storeResponsesEnabled } from "./config.ts";
 import { normalizeXaiErrorMessage } from "./errors.ts";
 import { processResponsesStreamFn } from "./pi-ai-api.ts";
 import {
     buildResponseCreate,
     prepareResponseOptions,
+    projectAssistantResponse,
     resolveApiKey,
     upgradeHeaders,
 } from "./payload.ts";
@@ -45,12 +46,15 @@ export function streamXaiResponsesWs(
         try {
             const apiKey = resolveApiKey(options);
             const preparedOptions = prepareResponseOptions(model, context, options, apiKey);
+            const storeResponses = storeResponsesEnabled() &&
+                Boolean(preparedOptions.sessionId?.trim());
             let payload = buildResponseCreate(model, context, preparedOptions);
             const nextPayload = await preparedOptions.onPayload?.(payload, model);
             if (nextPayload !== undefined && nextPayload !== null && typeof nextPayload === "object") {
                 payload = nextPayload as Record<string, unknown>;
             }
-            payload = { ...payload, store: false };
+            payload = { ...payload, store: storeResponses };
+            delete payload.previous_response_id;
 
             stream.push({ type: "start", partial: output });
 
@@ -62,6 +66,17 @@ export function streamXaiResponsesWs(
                 signal: preparedOptions.signal,
                 connectTimeoutMs: preparedOptions.websocketConnectTimeoutMs,
                 onOpen: (response) => preparedOptions.onResponse?.(response, model),
+                projectStoredOutput: () => {
+                    if (
+                        output.stopReason === "pending" ||
+                        output.stopReason === "error" ||
+                        output.stopReason === "aborted"
+                    ) {
+                        return undefined;
+                    }
+                    return projectAssistantResponse(model, output);
+                },
+                storeResponses,
             });
             await processResponsesStreamFn(
                 events as Parameters<typeof processResponsesStreamFn>[0],

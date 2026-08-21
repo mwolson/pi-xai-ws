@@ -1,8 +1,12 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_LIVENESS_TIMEOUT_MS, DEFAULT_PING_INTERVAL_MS } from "./liveness.ts";
 
 export const DEFAULT_WS_URL = "wss://api.x.ai/v1/responses";
 export const DEFAULT_WS_IDLE_TIMEOUT_MS = 5 * 60_000;
 export const DEFAULT_WS_MAX_AGE_MS = 24 * 60_000;
+export const XAI_WS_CONFIG_FILENAME = "pi-xai-ws.json";
 
 function readPositiveInt(name: string, fallback: number): number {
     const raw = process.env[name];
@@ -18,6 +22,42 @@ function readPositiveInt(name: string, fallback: number): number {
 
 export function cacheAffinityEnabled(cacheRetention?: string): boolean {
     return cacheRetention !== "none";
+}
+
+/**
+ * Stored-response continuation (`store: true` plus `previous_response_id`)
+ * lets xAI retain Responses state server-side so later calls send only new
+ * input items. Off by default: retention is a privacy tradeoff the caller
+ * must opt into explicitly.
+ */
+export function storeResponsesEnabled(configPath?: string): boolean {
+    const envValue = process.env.PI_XAI_WS_STORE;
+    if (envValue !== undefined) {
+        const normalized = envValue.trim().toLowerCase();
+        return normalized === "1" || normalized === "true";
+    }
+    let resolvedConfigPath: string | undefined;
+    try {
+        resolvedConfigPath = configPath ?? join(getAgentDir(), XAI_WS_CONFIG_FILENAME);
+        const parsed: unknown = JSON.parse(readFileSync(resolvedConfigPath, "utf8"));
+        return isPlainRecord(parsed) && parsed.storeResponses === true;
+    } catch (error) {
+        if (!isMissingFileError(error) && process.env.PI_XAI_WS_DEBUG === "1") {
+            const configLabel = resolvedConfigPath ?? "global config";
+            process.stderr.write(
+                `[pi-xai-ws] could not read ${configLabel}; stored responses remain disabled\n`,
+            );
+        }
+        return false;
+    }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isMissingFileError(error: unknown): boolean {
+    return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 function isXaiHost(hostname: string): boolean {

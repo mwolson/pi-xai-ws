@@ -1,7 +1,7 @@
 {
   "name": "@mwolson-org/pi-xai-ws",
   "version": "0.3.0",
-  "description": "Route Pi's built-in xAI Responses models over a persistent, store-disabled xAI Responses WebSocket with a ping-on-silence healthcheck.",
+  "description": "Route Pi's built-in xAI Responses models over a persistent xAI Responses WebSocket with a ping-on-silence healthcheck and optional opt-in stored-response continuation.",
   "type": "module",
   "license": "MIT",
   "author": "Mike Olson",
@@ -28,8 +28,8 @@
     "src"
   ],
   "scripts": {
-    "test": "npm run typecheck && node --experimental-strip-types --test tests/*.test.ts",
-    "test:catalog": "node --experimental-strip-types --test tests/provider-catalog.integration.ts",
+    "test": "npm run typecheck && node --experimental-strip-types --import ./tests/test-env.ts --test tests/*.test.ts",
+    "test:catalog": "node --experimental-strip-types --import ./tests/test-env.ts --test tests/provider-catalog.integration.ts",
     "typecheck": "tsc --noEmit"
   },
   "pi": {

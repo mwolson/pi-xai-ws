@@ -1,5 +1,5 @@
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
-import type { Context, Model, SimpleStreamOptions, StreamOptions } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions, StreamOptions } from "@earendil-works/pi-ai";
 import type { OpenAIResponsesOptions } from "@earendil-works/pi-ai/api/openai-responses";
 import {
     buildBaseOptionsFn,
@@ -7,9 +7,15 @@ import {
     convertResponsesMessagesFn,
     convertResponsesToolsFn,
 } from "./pi-ai-api.ts";
-import { cacheAffinityEnabled } from "./config.ts";
+import { cacheAffinityEnabled, storeResponsesEnabled } from "./config.ts";
 import { sanitizeContextMessages } from "./history.ts";
 
+const ASSISTANT_RESPONSE_ITEM_TYPES = new Set([
+    "custom_tool_call",
+    "function_call",
+    "message",
+    "reasoning",
+]);
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
 
@@ -44,6 +50,22 @@ export function prepareResponseOptions(
     };
 }
 
+export function projectAssistantResponse(
+    model: Model<"openai-responses">,
+    message: AssistantMessage,
+): readonly unknown[] {
+    const projected = convertResponsesMessagesFn(
+        model,
+        sanitizeContextMessages({ messages: [message] }),
+        OPENAI_TOOL_CALL_PROVIDERS,
+    ).filter((item) =>
+        typeof item === "object" &&
+        item !== null &&
+        ASSISTANT_RESPONSE_ITEM_TYPES.has((item as { type?: string }).type ?? "")
+    );
+    return JSON.parse(JSON.stringify(projected)) as readonly unknown[];
+}
+
 export function buildResponseCreate(
     model: Model<"openai-responses">,
     context: Context,
@@ -53,7 +75,7 @@ export function buildResponseCreate(
     const payload: Record<string, unknown> = {
         type: "response.create",
         model: model.id,
-        store: false,
+        store: storeResponsesEnabled(),
         input: convertResponsesMessagesFn(
             model,
             sanitizeContextMessages(context),

@@ -25,8 +25,9 @@ catalog and verifies that `grok-4.6` still resolves to `openai-responses`.
 | `src/provider.ts` | xAI provider registration and API matching. |
 | `src/stream.ts` | Pi stream setup, hooks, output projection, and error completion. |
 | `src/payload.ts` | Pi option preparation, full-context payloads, tools, reasoning, headers, and cache affinity. |
+| `src/continuation.ts` | Stored-response chain planning, covered-prefix checks, and rejection detection. |
 | `src/history.ts` | Responses and legacy thinking-signature handling. |
-| `src/config.ts` | WebSocket URL safety and environment settings. |
+| `src/config.ts` | Global `getAgentDir()/pi-xai-ws.json` loading, WebSocket URL safety, and environment settings. |
 | `src/liveness.ts` | Ping-on-silence state machine. |
 | `src/ws-events.ts` | WebSocket protocol, session pool, serialization, replay, bounds, and lifecycle. |
 | `src/errors.ts` | xAI error normalization for Pi. |
@@ -88,9 +89,17 @@ Changes must retain:
 - Payload and response hooks
 - Cache-affinity behavior
 
-The payload hook runs before the transport privacy pass. No code path may send
-`store: true` or `previous_response_id`, including hook replacements and retry
-payloads.
+The payload hook runs before the transport enforcement pass. Unless the global
+`getAgentDir()/pi-xai-ws.json` config enables `storeResponses`, or
+`PI_XAI_WS_STORE` explicitly enables it, no code path may send `store: true` or
+`previous_response_id`, including hook replacements and retry payloads. The
+environment value overrides the config file, including `0` to force the mode
+off. With storage and a nonempty Pi session ID enabled,
+`src/continuation.ts` owns request planning. The session tracks a socket-local
+head and a durable checkpoint, and
+only the session may set `previous_response_id` after the hook. Later terminals
+on one physical socket advance the socket-local head without advancing the
+durable checkpoint because response IDs may repeat or cycle.
 
 Normalize the payload through JSON serialization once before the first send.
 Tests cover dates, custom `toJSON` methods, accessors, class instances, sparse
@@ -103,14 +112,17 @@ which does not match the actual JSON wire representation.
 rules when adding or changing protocol events:
 
 1. A session has one active request.
-2. A request carries complete local history.
-3. Only one pre-output replay is allowed.
-4. Every event that represents model output disables replay.
-5. Protocol, local-bound, queue, lifecycle, and abort errors do not replay.
-6. Socket callbacks verify that they still belong to the current socket and
+2. Default-mode requests carry complete local history. Stored requests carry a
+   verified suffix from the socket-local or durable covered prefix.
+3. Only one pre-output transport retry is allowed.
+4. Every event that represents model output disables the internal retry.
+5. A replacement socket replans from the durable checkpoint rather than the
+   latest socket-local head.
+6. Protocol, local-bound, queue, lifecycle, and abort errors do not retry.
+7. Socket callbacks verify that they still belong to the current socket and
    request.
-7. All queues, frames, requests, and timers remain bounded.
-8. Disposal wakes waiters and prevents reconnects.
+8. All queues, frames, requests, and timers remain bounded.
+9. Disposal wakes waiters and prevents reconnects.
 
 When xAI adds an output event, update `isModelOutputEvent` before projecting the
 event. Missing an output type can cause a complete request to replay after the
@@ -124,7 +136,9 @@ test proving that the generator settles after that event.
 The test suite has three levels.
 
 Focused tests cover payloads, history filtering, URL protection, liveness, error
-normalization, and provider registration.
+normalization, provider registration, global config parsing, and environment
+override precedence. The test runner forces storage off before loading test
+files so a developer's global opt-in cannot change suite behavior.
 
 The local WebSocket harness covers framing and session behavior without calling
 xAI. It should prove:
@@ -132,12 +146,14 @@ xAI. It should prove:
 - Full-history requests on a reused socket
 - Privacy enforcement after hooks
 - Transport identity rotation
-- Pre-output replay and post-output suppression
+- Pre-output retry, durable-checkpoint recovery, and post-output suppression
 - Abort races and queued aborts
 - Disposal barriers
 - Idle and maximum-age rotation
 - Frame, event, byte, and request bounds
 - Malformed protocol data
+- Repeated and cycling socket-local response IDs across multiple reconnects
+- Missing stored-response references and one bounded full-context fallback
 
 The catalog integration test checks Pi's current remote model metadata. Keep it
 outside `npm test` so routine local tests remain deterministic.

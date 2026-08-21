@@ -41,6 +41,23 @@ A healthy two-turn session should normally show one socket open and two
 `mode=full` requests. The second request should have more input items because it
 contains the expanded local history.
 
+## Stored-response config is not taking effect
+
+The global config is `getAgentDir()/pi-xai-ws.json`, normally
+`~/.pi/agent/pi-xai-ws.json`. Its opt-in value must be the JSON boolean `true`:
+
+```json
+{
+  "storeResponses": true
+}
+```
+
+The strings `"true"` and `"1"` do not enable storage. A defined
+`PI_XAI_WS_STORE` overrides the file, so an inherited empty value, `0`, or
+`false` forces storage off. With `PI_XAI_WS_DEBUG=1`, an unreadable or malformed
+file emits a sanitized diagnostic and remains off. Calls without a persistent
+Pi session ID remain `store: false` regardless of configuration.
+
 ## Authentication failures
 
 The extension reuses the xAI credential Pi passes to provider streams. For the
@@ -73,7 +90,9 @@ The next request closes the retained socket and opens one with the new values.
 ## Liveness failures
 
 The default healthcheck sends a protocol ping after 15 seconds without an
-inbound frame and allows another 60 seconds for any response.
+inbound frame and allows another 60 seconds for any response. The transport
+also enables TCP keepalive with a 15-second initial delay to detect broken
+network paths independently of WebSocket control-frame handling.
 
 If a slow but healthy connection repeatedly reaches the liveness timeout, raise
 `PI_XAI_WS_LIVENESS_TIMEOUT_MS`. Avoid shortening it below normal model startup
@@ -101,17 +120,25 @@ calls:
 
 ## Replay and duplicate-work concerns
 
-A request can replay once only after a connection, socket, liveness, or explicit
+A request can retry once only after a connection, socket, liveness, or explicit
 xAI WebSocket connection-limit failure before model output.
 
-The extension does not replay malformed frames, queue overflows, local payload
+The extension does not retry malformed frames, queue overflows, local payload
 limits, aborts, or failures after output starts. Reasoning summaries, refusals,
-function-call arguments, and custom-tool input all count as output.
+function-call arguments, and custom-tool input all count as output. Pi may
+separately start a new assistant attempt when its configured retry policy
+classifies the reported error as transient.
 
-If logs show `pre-output reconnect`, xAI may still have received the first full
-request even though no output reached Pi. The one-replay limit prevents an
-unbounded recovery loop, but no client can prove that a silent remote worker did
-nothing. Apply stricter caller policy if duplicate remote work is unacceptable.
+With stored continuation enabled, xAI may reuse one response ID for multiple
+successful calls on the same socket. That ID advances the socket-local head but
+may rehydrate only its first stored response after reconnecting. A pre-output
+retry therefore resumes from the durable checkpoint and includes every locally
+recorded item since it. Resending only the newest tool result against the
+repeated ID can make xAI repeat an earlier tool call.
+
+If xAI returns `Response with id=... not found`, the extension forgets the
+reference and retries complete local history once. A second rejection is
+reported instead of creating an unbounded fallback loop.
 
 ## Queue and payload-limit failures
 

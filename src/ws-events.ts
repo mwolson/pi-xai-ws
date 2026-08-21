@@ -7,6 +7,14 @@ import {
     resolveWsMaxAgeMs,
 } from "./config.ts";
 import { SocketLiveness } from "./liveness.ts";
+import {
+    type ContinuationState,
+    type ContinuationRequestContext,
+    isContinuationRejection,
+    nextContinuationState,
+    planStoredRequest as planStoredRequestForChain,
+    readStoredResponse,
+} from "./continuation.ts";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_INBOUND_FRAME_BYTES = 4 * 1024 * 1024;
@@ -15,6 +23,7 @@ const DEFAULT_MAX_PENDING_SESSION_REQUESTS = 64;
 const MAX_QUEUED_EVENTS = 4_096;
 const MAX_TIMER_MS = 2_147_000_000;
 const REQUEST_AGE_HEADROOM_DIVISOR = 4;
+const TCP_KEEPALIVE_INITIAL_DELAY_MS = 15_000;
 
 const TERMINAL_TYPES = new Set([
     "response.completed",
@@ -64,6 +73,10 @@ export type OpenXaiEventsOptions = {
 
 export type XaiWsSessionEventsOptions = OpenXaiEventsOptions & {
     sessionId?: string;
+    /** Project the finalized assistant response through Pi's wire converter. */
+    projectStoredOutput?: () => readonly unknown[] | undefined;
+    /** Opt in to `store: true` plus `previous_response_id` continuation. */
+    storeResponses?: boolean;
 };
 
 export type XaiWsSessionPoolOptions = {
@@ -77,6 +90,8 @@ export type XaiWsSessionPoolOptions = {
 export type XaiWsDebugCounters = {
     aborts: number;
     connectionsOpened: number;
+    continuedRequests: number;
+    continuationFallbacks: number;
     failures: number;
     fullRequests: number;
     idleCleanups: number;
@@ -145,6 +160,8 @@ function newDebugCounters(): XaiWsDebugCounters {
     return {
         aborts: 0,
         connectionsOpened: 0,
+        continuedRequests: 0,
+        continuationFallbacks: 0,
         failures: 0,
         fullRequests: 0,
         idleCleanups: 0,
@@ -190,10 +207,12 @@ function normalizeEvent(payload: Record<string, unknown>): Record<string, unknow
     if (message === undefined) {
         return payload;
     }
+    const param = payload.param ?? nested?.param;
     return {
         type: "error",
         code: payload.code ?? nested?.code ?? payload.status,
         message,
+        ...(param !== undefined ? { param } : {}),
     };
 }
 
@@ -598,7 +617,13 @@ class XaiWsSocket {
                     state.opened = true;
                     state.openedAtMs = Date.now();
                     state.liveness.start();
-                    const nodeSocket = socket as WebSocket & { _socket?: { unref?: () => void } };
+                    const nodeSocket = socket as WebSocket & {
+                        _socket?: {
+                            setKeepAlive?: (enable?: boolean, initialDelay?: number) => unknown;
+                            unref?: () => void;
+                        };
+                    };
+                    nodeSocket._socket?.setKeepAlive?.(true, TCP_KEEPALIVE_INITIAL_DELAY_MS);
                     nodeSocket._socket?.unref?.();
                     state.ageTimer = setTimeout(() => {
                         if (this.state !== state || state.closed) {
@@ -768,11 +793,16 @@ class XaiWsSocket {
 class XaiWsSession {
     private active = false;
     private connection: XaiWsSocket | undefined;
+    private continuationTransportKey: string | undefined;
+    private durableChain: ContinuationState | undefined;
     private disposed = false;
     private idleTimer: ReturnType<typeof setTimeout> | undefined;
+    private lastStoredTerminalConnection: XaiWsSocket | undefined;
     private pendingAcquires = 0;
     private releaseQueue: Promise<void> = Promise.resolve();
+    private requestContext: ContinuationRequestContext | undefined;
     private resolveDisposed!: () => void;
+    private socketChain: { connection: XaiWsSocket; state: ContinuationState } | undefined;
     private transportKey: string | undefined;
     private readonly disposedPromise: Promise<void>;
     private readonly sessionId: string | undefined;
@@ -809,6 +839,7 @@ class XaiWsSession {
 
     async *iterate(options: XaiWsSessionEventsOptions): AsyncGenerator<Record<string, unknown>> {
         const release = await this.acquire(options.signal);
+        let clearStoredChainOnExit = false;
         try {
             this.throwIfDisposed();
             this.active = true;
@@ -818,15 +849,29 @@ class XaiWsSession {
             }
 
             this.counters.requests += 1;
-            const payload = fullContextPayload(options.createPayload);
+            const wirePayload = normalizeWireRecord(options.createPayload);
+            const storeResponses = options.storeResponses === true;
+            clearStoredChainOnExit = storeResponses;
+            if (!storeResponses) {
+                this.clearContinuation();
+            }
             const nextTransportKey = transportIdentity(options);
+            if (
+                (this.socketChain || this.durableChain) &&
+                this.continuationTransportKey !== nextTransportKey
+            ) {
+                this.clearContinuation();
+                this.counters.continuationFallbacks += 1;
+                debugLog("continuation reset after transport identity change");
+            }
             if (this.transportKey !== undefined && this.transportKey !== nextTransportKey) {
                 this.closeConnection("transport changed");
             }
-            this.transportKey = nextTransportKey;
 
-            let preOutputReplayed = false;
+            let continuationFallbackUsed = false;
+            let forceFullContext = false;
             let responseReported = false;
+            let transportReplayed = false;
             const onOpen: OpenXaiEventsOptions["onOpen"] = async (response) => {
                 if (responseReported) {
                     return;
@@ -837,12 +882,24 @@ class XaiWsSession {
 
             while (true) {
                 this.throwIfDisposed();
-                const inputItems = Array.isArray(payload.input) ? payload.input.length : 0;
-                debugLog(`request mode=full input_items=${inputItems}`);
-                this.counters.fullRequests += 1;
                 const connection = this.ensureConnection(options, nextTransportKey);
+                const continuation = forceFullContext
+                    ? undefined
+                    : this.continuationForConnection(connection);
+                const payload = storeResponses
+                    ? this.planStoredRequest(wirePayload, continuation)
+                    : fullContextPayload(wirePayload);
+                const inputItems = Array.isArray(payload.input) ? payload.input.length : 0;
+                if (typeof payload.previous_response_id === "string") {
+                    debugLog(`request mode=continue input_items=${inputItems}`);
+                    this.counters.continuedRequests += 1;
+                } else {
+                    debugLog(`request mode=full input_items=${inputItems}`);
+                    this.counters.fullRequests += 1;
+                }
                 let outputStarted = false;
                 let retryConnectionLimit = false;
+                let retryContinuationFallback = false;
                 try {
                     for await (const event of connection.request({
                         ...options,
@@ -852,13 +909,38 @@ class XaiWsSession {
                         if (isModelOutputEvent(event)) {
                             outputStarted = true;
                         }
-                        if (isConnectionLimitReached(event) && !preOutputReplayed && !outputStarted) {
-                            preOutputReplayed = true;
+                        if (isConnectionLimitReached(event) && !transportReplayed && !outputStarted) {
+                            transportReplayed = true;
                             this.counters.preOutputReplays += 1;
                             retryConnectionLimit = true;
                             break;
                         }
-                        yield event;
+                        if (
+                            storeResponses &&
+                            typeof payload.previous_response_id === "string" &&
+                            !continuationFallbackUsed &&
+                            !outputStarted &&
+                            isContinuationRejection(event)
+                        ) {
+                            continuationFallbackUsed = true;
+                            this.counters.continuationFallbacks += 1;
+                            retryContinuationFallback = true;
+                            break;
+                        }
+                        const stored = storeResponses ? readStoredResponse(event) : undefined;
+                        try {
+                            yield event;
+                        } finally {
+                            if (stored) {
+                                this.observeStoredTerminal(
+                                    connection,
+                                    stored,
+                                    options.projectStoredOutput,
+                                    nextTransportKey,
+                                );
+                                clearStoredChainOnExit = false;
+                            }
+                        }
                     }
                 } catch (error) {
                     if (this.disposed) {
@@ -874,11 +956,11 @@ class XaiWsSession {
                         throw error;
                     }
                     if (
-                        !preOutputReplayed &&
+                        !transportReplayed &&
                         isReplayableTransportError(error) &&
                         !error.outputStarted
                     ) {
-                        preOutputReplayed = true;
+                        transportReplayed = true;
                         this.counters.preOutputReplays += 1;
                         this.closeConnection("pre-output reconnect");
                         continue;
@@ -890,14 +972,22 @@ class XaiWsSession {
                     throw error;
                 }
 
-                if (retryConnectionLimit) {
+                if (retryConnectionLimit || retryContinuationFallback) {
                     this.throwIfDisposed();
-                    this.closeConnection("connection limit");
+                    this.closeConnection(retryContinuationFallback ? "continuation rejected" : "connection limit");
+                    if (retryContinuationFallback) {
+                        this.clearContinuation();
+                        forceFullContext = true;
+                    }
                     continue;
                 }
                 return;
             }
         } finally {
+            if (clearStoredChainOnExit) {
+                this.clearContinuation();
+                debugLog("continuation cleared after request without stored terminal");
+            }
             this.active = false;
             this.scheduleIdleCleanup();
             release();
@@ -965,6 +1055,83 @@ class XaiWsSession {
         }
     }
 
+    private continuationForConnection(connection: XaiWsSocket): ContinuationState | undefined {
+        if (this.socketChain?.connection === connection) {
+            return this.socketChain.state;
+        }
+        return this.durableChain;
+    }
+
+    private planStoredRequest(
+        base: Record<string, unknown>,
+        continuation: ContinuationState | undefined,
+    ): Record<string, unknown> {
+        const plan = planStoredRequestForChain(base, continuation);
+        if (plan.resetChain) {
+            debugLog(`continuation reset covered_items=${continuation?.coveredInput.length ?? 0} full_items=${plan.context.fullInput.length}`);
+            this.clearContinuation();
+            this.counters.continuationFallbacks += 1;
+        }
+        this.requestContext = plan.context;
+        return plan.payload;
+    }
+
+    private observeStoredTerminal(
+        connection: XaiWsSocket,
+        stored: { responseId: string },
+        projectStoredOutput: (() => readonly unknown[] | undefined) | undefined,
+        transportKey: string,
+    ): void {
+        const context = this.requestContext;
+        this.requestContext = undefined;
+        if (!context || !projectStoredOutput) {
+            this.clearContinuation();
+            return;
+        }
+        try {
+            const projectedOutput = projectStoredOutput();
+            if (!projectedOutput) {
+                this.clearContinuation();
+                return;
+            }
+            const next = nextContinuationState(context, stored, projectedOutput);
+            // Later IDs on one socket can cycle back to an older ID, so only
+            // the socket's first new ID is safe to promote across reconnects.
+            // Keep this marker after close because close may race terminal
+            // observation and clears the socket-local head.
+            const firstStoredTerminalOnSocket = this.lastStoredTerminalConnection !== connection;
+            const durableAdvanced = !this.durableChain || (
+                firstStoredTerminalOnSocket &&
+                this.durableChain.responseId !== next.responseId
+            );
+            this.lastStoredTerminalConnection = connection;
+            this.socketChain = { connection, state: next };
+            if (durableAdvanced) {
+                this.durableChain = next;
+            }
+            this.continuationTransportKey = transportKey;
+            debugLog(
+                `continuation stored socket_covered_items=${next.coveredInput.length} durable_covered_items=${this.durableChain?.coveredInput.length ?? 0} projected_items=${projectedOutput.length} durable_advanced=${durableAdvanced}`,
+            );
+        } catch {
+            this.clearContinuation();
+        }
+    }
+
+    private clearContinuation(): void {
+        this.continuationTransportKey = undefined;
+        this.durableChain = undefined;
+        this.lastStoredTerminalConnection = undefined;
+        this.requestContext = undefined;
+        this.socketChain = undefined;
+    }
+
+    private clearSocketContinuation(connection: XaiWsSocket): void {
+        if (this.socketChain?.connection === connection) {
+            this.socketChain = undefined;
+        }
+    }
+
     private ensureConnection(options: XaiWsSessionEventsOptions, transportKey: string): XaiWsSocket {
         this.throwIfDisposed();
         if (this.connection?.shouldRotateBeforeRequest) {
@@ -983,6 +1150,7 @@ class XaiWsSession {
                     if (reason === "max age" || reason === "request age") {
                         this.counters.rotations += 1;
                     }
+                    this.clearSocketContinuation(connection);
                     if (this.connection === connection) {
                         this.connection = undefined;
                         this.transportKey = undefined;
@@ -1008,6 +1176,7 @@ class XaiWsSession {
         }
         this.connection = undefined;
         this.transportKey = undefined;
+        this.clearSocketContinuation(connection);
         connection.close(reason);
     }
 
@@ -1070,7 +1239,7 @@ export class XaiWsSessionPool {
         if (!sessionId) {
             const session = this.createSession(undefined);
             try {
-                yield* session.iterate(options);
+                yield* session.iterate({ ...options, sessionId: undefined, storeResponses: false });
             } finally {
                 session.dispose();
             }
