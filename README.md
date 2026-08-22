@@ -41,8 +41,10 @@ pi remove npm:@mwolson-org/pi-xai-ws
 ## Recommended Pi retry settings
 
 The extension marks recognized xAI capacity errors as "overloaded" so Pi can
-apply its agent-level retry policy. For longer Grok jobs, it's recommended to
-add these settings to `~/.pi/agent/settings.json`:
+apply its agent-level retry policy. Pi enables that policy by default. For
+longer Grok jobs, these optional agent-wide settings raise the retry budget and
+backoff for every provider. Merge them into the global Pi settings file at
+`getAgentDir()/settings.json`, normally `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -57,9 +59,10 @@ add these settings to `~/.pi/agent/settings.json`:
 }
 ```
 
-Keeping provider-level retries disabled lets Pi own the retry budget and avoids
-stacking SDK retries under agent-level retries. This policy is separate from the
-extension's single safe transport replay before model output begins.
+Keeping provider-level retries disabled, as Pi does by default, lets Pi own the
+retry budget and avoids stacking SDK retries under agent-level retries. This
+policy is separate from the extension's single safe transport replay before
+model output begins.
 
 ## Settings
 
@@ -79,9 +82,14 @@ With `cacheRetention: "none"`, the extension omits `prompt_cache_key` and
 ### Global package config
 
 Pi extensions conventionally keep global package configuration under the Pi
-agent directory. If you're OK with 30-day retention of responses in exchange for
-a better cache rate (and don't have users who live in localities who disallow
-that), enable stored-response continuation for every Pi process using this agent
+agent directory. [xAI documents a 30-day retention period](https://docs.x.ai/developers/model-capabilities/text/generate-text)
+for saved Responses state, including previous prompts, reasoning content, and
+model responses. This opt-in makes that state retrievable by ID for continuation
+and is incompatible with [Zero Data Retention](https://docs.x.ai/developers/faq/security#what-is-zero-data-retention-zdr).
+Enable it only when that retention is acceptable. Cache affinity remains enabled
+when stored responses are off.
+
+Enable stored-response continuation for every Pi process using this agent
 directory by creating `~/.pi/agent/pi-xai-ws.json`:
 
 ```json

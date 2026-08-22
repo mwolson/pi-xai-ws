@@ -192,6 +192,7 @@ public release notes. Report validation separately in the release handoff.
 Update and inspect the draft:
 
 ```sh
+tag="v$(node -p 'require("./package.json").version')"
 gh release edit "$tag" --notes-file "tmp/release-$tag.md"
 gh release view "$tag" --web
 ```
@@ -199,6 +200,7 @@ gh release view "$tag" --web
 Publish only after the draft looks correct. Then verify the published release:
 
 ```sh
+tag="v$(node -p 'require("./package.json").version')"
 gh release edit "$tag" --draft=false
 gh release view "$tag" --json isDraft,url
 ```
