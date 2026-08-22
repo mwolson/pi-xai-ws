@@ -153,10 +153,10 @@ reference when any of these occur:
 
 Reference rejection has a separate bounded budget from pre-output transport
 retry. Each recovery may run once per logical request, but a reference fallback
-does not replenish an already spent transport replay. Idle cleanup evicts the
-in-memory session after five minutes by default,
-so the next call starts over with complete history. Process restarts and
-explicit pool disposal also clear both positions. Debug counters expose
+does not replenish an already spent transport replay. Idle cleanup closes only
+the physical socket. The retained session keeps its durable checkpoint and can
+continue from it on the replacement socket. Process restarts and explicit pool
+disposal clear both continuation positions. Debug counters expose
 `continuedRequests`, `continuationFallbacks`, and `fullRequests`;
 `PI_XAI_WS_DEBUG=1` logs each request as `mode=full` or `mode=continue` with its
 input item count.
@@ -169,7 +169,13 @@ is off by default.
 
 A nonempty Pi session ID selects a retained session object. The session allows
 one active model call and queues at most 64 waiting calls. Requests run in order
-so frames from different calls cannot overlap on one socket.
+so frames from different calls cannot overlap on one socket. The pool does not
+evict durable checkpoints by count. Sessions that hold them remain until process
+exit or explicit pool disposal, preserving continuation across any number of
+session IDs. Long-lived processes that store responses for many distinct IDs
+therefore keep their checkpoint metadata in memory. A session with no durable
+checkpoint may be removed after an aborted or failed request leaves it without a
+socket.
 
 A call without a session ID receives a request-owned session and socket. The
 transport forces `store: false` because that call cannot reuse continuation
@@ -195,8 +201,9 @@ therefore starts on a fresh socket after 18 minutes. This leaves time for a
 long-running turn before the hard limit.
 
 Reaching maximum age during a request marks the socket expired. The active call
-can settle, then the session closes the socket. An idle session closes its
-socket after five minutes by default and removes itself from the pool.
+can settle, then the session closes the socket. A session also closes its socket
+after five idle minutes by default, but keeps its durable continuation checkpoint
+for the next connection.
 
 ## Liveness
 
@@ -248,7 +255,7 @@ other than the explicit pre-output WebSocket connection-limit signal.
 
 ## Resource bounds
 
-Each socket enforces these defaults:
+The transport enforces these defaults:
 
 | Resource | Limit |
 | --- | ---: |

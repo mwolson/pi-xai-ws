@@ -142,10 +142,6 @@ type SocketState = {
     liveness: SocketLiveness;
 };
 
-type SessionCallbacks = {
-    onClosed: () => void;
-};
-
 function newDeferred(): Deferred {
     let resolvePromise!: () => void;
     let rejectPromise!: (error: Error) => void;
@@ -808,18 +804,15 @@ class XaiWsSession {
     private readonly sessionId: string | undefined;
     private readonly poolOptions: Required<XaiWsSessionPoolOptions>;
     private readonly counters: XaiWsDebugCounters;
-    private readonly callbacks: SessionCallbacks;
 
     constructor(
         sessionId: string | undefined,
         poolOptions: Required<XaiWsSessionPoolOptions>,
         counters: XaiWsDebugCounters,
-        callbacks: SessionCallbacks,
     ) {
         this.sessionId = sessionId;
         this.poolOptions = poolOptions;
         this.counters = counters;
-        this.callbacks = callbacks;
         this.disposedPromise = new Promise<void>((resolve) => {
             this.resolveDisposed = resolve;
         });
@@ -834,7 +827,13 @@ class XaiWsSession {
     }
 
     get isUnused(): boolean {
-        return !this.active && !this.connection && this.pendingAcquires === 0;
+        return (
+            !this.active &&
+            this.pendingAcquires === 0 &&
+            !this.connection &&
+            !this.durableChain &&
+            !this.socketChain
+        );
     }
 
     async *iterate(options: XaiWsSessionEventsOptions): AsyncGenerator<Record<string, unknown>> {
@@ -1197,8 +1196,7 @@ class XaiWsSession {
             }
             this.counters.idleCleanups += 1;
             this.closeConnection("idle timeout");
-            this.callbacks.onClosed();
-            debugLog("idle session cleaned up");
+            debugLog("idle socket closed");
         }, this.poolOptions.idleTimeoutMs);
         this.idleTimer.unref?.();
     }
@@ -1253,12 +1251,11 @@ export class XaiWsSessionPool {
         }
         try {
             yield* session.iterate({ ...options, sessionId });
-        } catch (error) {
+        } finally {
             if (session.isUnused && this.sessionsById.get(sessionId) === session) {
                 this.sessionsById.delete(sessionId);
                 session.dispose();
             }
-            throw error;
         }
     }
 
@@ -1289,20 +1286,7 @@ export class XaiWsSessionPool {
     }
 
     private createSession(sessionId: string | undefined): XaiWsSession {
-        let session!: XaiWsSession;
-        session = new XaiWsSession(
-            sessionId,
-            this.options,
-            this.counters,
-            {
-                onClosed: () => {
-                    if (sessionId !== undefined && this.sessionsById.get(sessionId) === session) {
-                        this.sessionsById.delete(sessionId);
-                    }
-                },
-            },
-        );
-        return session;
+        return new XaiWsSession(sessionId, this.options, this.counters);
     }
 }
 

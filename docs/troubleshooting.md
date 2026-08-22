@@ -154,6 +154,13 @@ A request backlog usually means callers are issuing overlapping model calls for
 the same Pi session. Allow the active stream to settle or abort obsolete queued
 calls.
 
+The pool intentionally does not evict durable checkpoints by count. A
+long-lived process that stores responses for many distinct session IDs retains
+their checkpoint metadata until process exit or explicit pool disposal. This
+avoids silently replacing continuation with a full-context replay. Sessions
+without a durable checkpoint may be removed when an aborted or failed request
+leaves them without a socket.
+
 ## Existing threads and uninstalling
 
 The package writes Responses-shaped assistant history with

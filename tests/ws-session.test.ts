@@ -619,7 +619,7 @@ describe("XaiWsSessionPool", () => {
         }
     });
 
-    it("removes idle sessions and opens a new socket after cleanup", async () => {
+    it("prunes an empty idle session after a pre-aborted reconnect", async () => {
         const harness = await createHarness((socket, _payload, requestNumber) => {
             completed(socket, `response-${requestNumber}`);
         });
@@ -627,6 +627,21 @@ describe("XaiWsSessionPool", () => {
         try {
             await collect(pool, requestOptions(harness.url, [{ role: "user", text: "first" }]));
             await wait(60);
+
+            assert.equal(pool.inspect().openSockets, 0);
+            assert.equal(pool.inspect().sessions, 1);
+
+            const controller = new AbortController();
+            controller.abort();
+            await assert.rejects(
+                () => collect(pool, {
+                    ...requestOptions(harness.url, [{ role: "user", text: "aborted" }]),
+                    signal: controller.signal,
+                }),
+                /Request was aborted/,
+            );
+            assert.equal(pool.inspect().sessions, 0);
+
             await collect(pool, requestOptions(harness.url, [{ role: "user", text: "second" }]));
 
             assert.equal(harness.connectionCount(), 2);
@@ -1299,7 +1314,7 @@ describe("XaiWsSessionPool stored-response continuation", () => {
         }
     });
 
-    it("discards stored checkpoints when an idle session is evicted", async () => {
+    it("retains stored checkpoints after an idle socket closes and a reconnect is pre-aborted", async () => {
         const firstInput = [{ role: "user", text: "first" }];
         const firstOutput = [{ role: "assistant", text: "answer" }];
         const secondInput = [...firstInput, ...firstOutput, { role: "user", text: "second" }];
@@ -1310,12 +1325,106 @@ describe("XaiWsSessionPool stored-response continuation", () => {
         try {
             await collect(pool, storedOptions(harness.url, firstInput, firstOutput));
             await wait(60);
+
+            assert.equal(pool.inspect().openSockets, 0);
+            assert.equal(pool.inspect().sessions, 1);
+
+            const controller = new AbortController();
+            controller.abort();
+            await assert.rejects(
+                () => collect(pool, {
+                    ...storedOptions(harness.url, secondInput, []),
+                    signal: controller.signal,
+                }),
+                /Request was aborted/,
+            );
+
+            assert.equal(harness.requests.length, 1);
+            assert.equal(pool.inspect().sessions, 1);
+
             await collect(pool, storedOptions(harness.url, secondInput, []));
 
             assert.equal(harness.connectionCount(), 2);
-            assert.equal(harness.requests[1]?.payload.previous_response_id, undefined);
-            assert.deepEqual(harness.requests[1]?.payload.input, secondInput);
+            assert.equal(harness.requests[1]?.payload.previous_response_id, "response-1");
+            assert.deepEqual(harness.requests[1]?.payload.input, [
+                { role: "user", text: "second" },
+            ]);
             assert.equal(pool.inspect().counters.idleCleanups, 1);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("removes a pre-aborted new session without touching retained checkpoints", async () => {
+        const firstInput = [{ role: "user", text: "first" }];
+        const firstOutput = [{ role: "assistant", text: "answer" }];
+        const secondInput = [...firstInput, ...firstOutput, { role: "user", text: "second" }];
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            completed(socket, `response-${requestNumber}`);
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, firstOutput, "session-a"));
+            await collect(pool, storedOptions(harness.url, [{ role: "user", text: "other" }], [], "session-b"));
+
+            const controller = new AbortController();
+            controller.abort();
+            await assert.rejects(
+                () => collect(pool, {
+                    ...storedOptions(harness.url, [{ role: "user", text: "aborted" }], [], "session-c"),
+                    signal: controller.signal,
+                }),
+                /Request was aborted/,
+            );
+
+            assert.equal(pool.inspect().sessions, 2);
+
+            await collect(pool, storedOptions(harness.url, secondInput, [], "session-a"));
+
+            assert.equal(harness.requests.length, 3);
+            assert.equal(harness.requests[2]?.payload.previous_response_id, "response-1");
+            assert.deepEqual(harness.requests[2]?.payload.input, [
+                { role: "user", text: "second" },
+            ]);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("retains stored checkpoints across more than eight sessions", async () => {
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            completed(socket, `response-${requestNumber}`);
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            for (let index = 0; index < 9; index += 1) {
+                await collect(pool, storedOptions(
+                    harness.url,
+                    [{ role: "user", text: `first-${index}` }],
+                    [{ role: "assistant", text: `answer-${index}` }],
+                    `session-${index}`,
+                ));
+            }
+
+            assert.equal(pool.inspect().sessions, 9);
+
+            await collect(pool, storedOptions(
+                harness.url,
+                [
+                    { role: "user", text: "first-0" },
+                    { role: "assistant", text: "answer-0" },
+                    { role: "user", text: "second" },
+                ],
+                [],
+                "session-0",
+            ));
+
+            assert.equal(harness.requests[9]?.payload.previous_response_id, "response-1");
+            assert.deepEqual(harness.requests[9]?.payload.input, [
+                { role: "user", text: "second" },
+            ]);
         } finally {
             pool.closeAll();
             await harness.close();
