@@ -1,8 +1,9 @@
 # Release process
 
-Releases publish from Git tags through `.github/workflows/publish.yml`. The tag
-must exactly match the version in `package.json`. Do not publish locally in
-addition to the workflow.
+Git tags start `.github/workflows/publish.yml`, which validates and publishes
+the package to npm. The tag must exactly match the version in `package.json`.
+Do not run `npm publish` locally. Create the GitHub release by hand after npm
+publication succeeds, as described in step 8.
 
 ## 1. Choose the version
 
@@ -141,7 +142,7 @@ Push the branch first. Push the tag only after the branch push succeeds and the
 intended commit is visible on the remote. The tag starts the npm publish
 workflow.
 
-## 7. Verify publication
+## 7. Verify npm publication
 
 Wait for both workflow jobs to pass, then confirm npm reports the new version:
 
@@ -152,7 +153,60 @@ npm view @mwolson-org/pi-xai-ws version
 Confirm that the npm tarball includes `docs/` and that its peer dependencies
 still name both Pi packages.
 
-## 8. Upgrade and verify Pi discovery
+## 8. Draft and publish the GitHub release
+
+Create the GitHub release only after npm publication succeeds. From the
+repository root, fetch the remote tags and resolve the previous version tag
+before asking GitHub to generate a draft:
+
+```sh
+git fetch --tags origin
+tag="v$(node -p 'require("./package.json").version')"
+previous_tag=$(git describe --tags --abbrev=0 --match 'v*' "$tag^") || {
+    echo "Could not resolve the previous tag from $tag." >&2
+    exit 1
+}
+
+gh release create "$tag" \
+    --draft \
+    --generate-notes \
+    --notes-start-tag "$previous_tag" \
+    --title "$tag" \
+    --verify-tag
+
+mkdir -p tmp
+gh release view "$tag" --json body --jq .body > "tmp/release-$tag.md"
+git log --oneline "$previous_tag..$tag"
+```
+
+Review the commits since the previous tag and edit the generated notes in
+`tmp/release-$tag.md`. Start with a short summary. Group related changes under
+descriptive headings instead of using one generic `## Changes` section when a
+release has multiple themes. Put user-visible changes first and maintenance
+details afterward. Keep GitHub's `Full Changelog` link at the bottom when the
+generated notes included one.
+
+Do not include routine verification sections or lists of check commands in
+public release notes. Report validation separately in the release handoff.
+
+Update and inspect the draft:
+
+```sh
+gh release edit "$tag" --notes-file "tmp/release-$tag.md"
+gh release view "$tag" --web
+```
+
+Publish only after the draft looks correct. Then verify the published release:
+
+```sh
+gh release edit "$tag" --draft=false
+gh release view "$tag" --json isDraft,url
+```
+
+Confirm that `isDraft` is `false` and that the release URL resolves to the
+intended tag.
+
+## 9. Upgrade and verify Pi discovery
 
 Update the installed package:
 
