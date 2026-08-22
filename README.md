@@ -38,6 +38,29 @@ Remove the package with:
 pi remove npm:@mwolson-org/pi-xai-ws
 ```
 
+## Recommended Pi retry settings
+
+The extension marks recognized xAI capacity errors as "overloaded" so Pi can
+apply its agent-level retry policy. For longer Grok jobs, it's recommended to
+add these settings to `~/.pi/agent/settings.json`:
+
+```json
+{
+  "retry": {
+    "enabled": true,
+    "maxRetries": 5,
+    "baseDelayMs": 3000,
+    "provider": {
+      "maxRetries": 0
+    }
+  }
+}
+```
+
+Keeping provider-level retries disabled lets Pi own the retry budget and avoids
+stacking SDK retries under agent-level retries. This policy is separate from the
+extension's single safe transport replay before model output begins.
+
 ## Settings
 
 | Variable                        | Default                                                               | Description                                                                                                                                    |
@@ -56,8 +79,10 @@ With `cacheRetention: "none"`, the extension omits `prompt_cache_key` and
 ### Global package config
 
 Pi extensions conventionally keep global package configuration under the Pi
-agent directory. Enable stored-response continuation for every Pi process using
-this agent directory by creating `~/.pi/agent/pi-xai-ws.json`:
+agent directory. If you're OK with 30-day retention of responses in exchange for
+a better cache rate (and don't have users who live in localities who disallow
+that), enable stored-response continuation for every Pi process using this agent
+directory by creating `~/.pi/agent/pi-xai-ws.json`:
 
 ```json
 {
