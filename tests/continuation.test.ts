@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
     type ContinuationState,
+    continuationInputDigest,
     isContinuationRejection,
-    jsonItemsEqual,
     nextContinuationState,
     planStoredRequest,
     readStoredResponse,
@@ -19,7 +19,11 @@ function basePayload(input: unknown[]): Record<string, unknown> {
 }
 
 function state(coveredInput: unknown[]): ContinuationState {
-    return { coveredInput, responseId: "response-prev" };
+    return {
+        coveredInputDigest: continuationInputDigest(coveredInput),
+        coveredItemCount: coveredInput.length,
+        responseId: "response-prev",
+    };
 }
 
 describe("planStoredRequest", () => {
@@ -56,12 +60,13 @@ describe("planStoredRequest", () => {
         const base = basePayload(full);
         base.previous_response_id = "hook-supplied";
 
+        const originalChain = { ...chain };
         planStoredRequest(base, chain);
 
         assert.deepEqual(base.input, full);
         assert.equal(base.store, false);
         assert.equal(base.previous_response_id, "hook-supplied");
-        assert.deepEqual(chain.coveredInput, covered);
+        assert.deepEqual(chain, originalChain);
     });
 
     it("falls back to full context when history was rewritten", () => {
@@ -113,14 +118,44 @@ describe("planStoredRequest", () => {
         assert.equal(plan.payload.previous_response_id, undefined);
         assert.deepEqual(plan.payload.input, covered);
     });
+
+    it("falls back safely when the candidate prefix is not canonical JSON", () => {
+        const covered = [{ role: "user", text: "first" }];
+        const input = [
+            { role: "user", text: undefined },
+            { role: "user", text: "second" },
+        ];
+        const plan = planStoredRequest(basePayload(input), state(covered));
+
+        assert.equal(plan.resetChain, true);
+        assert.equal(plan.payload.previous_response_id, undefined);
+        assert.deepEqual(plan.payload.input, input);
+    });
 });
 
-describe("jsonItemsEqual", () => {
-    it("compares structurally regardless of key order", () => {
-        assert.equal(jsonItemsEqual([{ a: 1, b: [2, { c: 3 }] }], [{ b: [2, { c: 3 }], a: 1 }]), true);
-        assert.equal(jsonItemsEqual([{ a: 1 }], [{ a: 1, b: undefined }]), false);
-        assert.equal(jsonItemsEqual([{ a: 1 }], [{ a: 2 }]), false);
-        assert.equal(jsonItemsEqual([{ a: 1 }], [{ a: 1 }, { b: 2 }]), false);
+describe("continuationInputDigest", () => {
+    it("hashes JSON structure independently of object key order", () => {
+        const left = continuationInputDigest([{ a: 1, b: [2, { c: 3 }] }]);
+        const reordered = continuationInputDigest([{ b: [2, { c: 3 }], a: 1 }]);
+
+        assert.equal(left, reordered);
+        assert.notEqual(left, continuationInputDigest([{ a: 2, b: [2, { c: 3 }] }]));
+        assert.notEqual(left, continuationInputDigest([{ a: 1, b: [2, { c: 4 }] }]));
+        assert.notEqual(left, continuationInputDigest([{ a: 1, b: [2, { c: 3 }] }, null]));
+        assert.notEqual(continuationInputDigest(["ab", "c"]), continuationInputDigest(["a", "bc"]));
+        assert.notEqual(continuationInputDigest([1]), continuationInputDigest(["1"]));
+        assert.notEqual(continuationInputDigest(["\uD800"]), continuationInputDigest(["\uFFFD"]));
+        assert.notEqual(continuationInputDigest([{ "\uDC00": 1 }]), continuationInputDigest([{ "\uFFFD": 1 }]));
+    });
+
+    it("hashes only the requested prefix without slicing it", () => {
+        const input = [{ a: 1 }, { b: 2 }, { c: 3 }];
+
+        assert.equal(
+            continuationInputDigest(input, 2),
+            continuationInputDigest(input.slice(0, 2)),
+        );
+        assert.throws(() => continuationInputDigest(input, 4), /outside the input range/);
     });
 });
 
@@ -145,7 +180,7 @@ describe("readStoredResponse", () => {
 });
 
 describe("nextContinuationState", () => {
-    it("stores the complete Pi-side prefix including projected assistant output", () => {
+    it("stores a fixed-size digest of the covered Pi-side prefix", () => {
         const context = {
             fullInput: [{ role: "user" }, { type: "function_call_output" }],
         };
@@ -156,9 +191,30 @@ describe("nextContinuationState", () => {
         const next = nextContinuationState(context, { responseId: "response-next" }, projectedOutput);
 
         assert.deepEqual(next, {
-            coveredInput: [...context.fullInput, ...projectedOutput],
+            coveredInputDigest: continuationInputDigest([
+                ...context.fullInput,
+                ...projectedOutput,
+            ]),
+            coveredItemCount: 4,
             responseId: "response-next",
         });
+        assert.equal(Object.hasOwn(next, "coveredInput"), false);
+    });
+
+    it("does not grow retained state with covered input content", () => {
+        const small = nextContinuationState(
+            { fullInput: [{ role: "user", text: "x" }] },
+            { responseId: "response-next" },
+            [],
+        );
+        const large = nextContinuationState(
+            { fullInput: [{ role: "user", text: "x".repeat(1_000_000) }] },
+            { responseId: "response-next" },
+            [],
+        );
+
+        assert.equal(JSON.stringify(small).length, JSON.stringify(large).length);
+        assert.notEqual(small.coveredInputDigest, large.coveredInputDigest);
     });
 });
 

@@ -114,20 +114,23 @@ the transport converts the finalized assistant message through the same
 Responses converter used for the next request. Server-only output items are not
 counted because xAI may retain items that Pi does not persist locally.
 
-On one open socket, later calls verify the complete covered prefix and send
-only the newest suffix with `previous_response_id`. Live SuperGrok OAuth probes
+On one open socket, later calls verify a SHA-256 digest of the complete covered
+prefix and send only the newest suffix with `previous_response_id`. The local
+checkpoint retains the covered item count and digest rather than the input
+objects themselves. Live SuperGrok OAuth probes
 on 2026-08-21 showed that xAI can reuse one response ID for multiple completed
 calls on a socket. The socket-local state advances, but reconnecting with that
 ID rehydrates the first stored response associated with it rather than the
 latest socket-local response.
 
-The session therefore holds the first safely rehydratable prefix for the
-current socket lineage as its durable checkpoint. Later terminals update only
+The session therefore describes the first safely rehydratable prefix for the
+current socket lineage with its durable checkpoint. Later terminals update only
 the socket-local head because IDs could follow a sequence such as `A`, `B`,
 `A`; promoting the final `A` would attach its newer local prefix to A's older
-stored state. After a socket boundary, the session sends the durable
-checkpoint's `previous_response_id` plus every locally projected input and
-assistant item recorded since that checkpoint. The replacement socket's first
+stored state. After a socket boundary, the session verifies the durable
+checkpoint digest, then sends its `previous_response_id` plus every locally
+projected input and assistant item after the checkpoint's item count. The
+replacement socket's first
 successful terminal can promote a new response ID to the next durable
 checkpoint. A focused live probe verified a recovery suffix containing a tool
 result, projected reasoning and function call, and the next tool result. xAI
@@ -172,10 +175,12 @@ one active model call and queues at most 64 waiting calls. Requests run in order
 so frames from different calls cannot overlap on one socket. The pool does not
 evict durable checkpoints by count. Sessions that hold them remain until process
 exit or explicit pool disposal, preserving continuation across any number of
-session IDs. Long-lived processes that store responses for many distinct IDs
-therefore keep their checkpoint metadata in memory. A session with no durable
-checkpoint may be removed after an aborted or failed request leaves it without a
-socket.
+session IDs. Each retained position contains a response ID, covered item count,
+and fixed-size SHA-256 digest rather than conversation content. Its size is
+independent of conversation length, apart from the provider-issued response ID.
+Long-lived processes that store responses for many distinct IDs therefore keep
+only small checkpoint metadata for each ID. A session with no durable checkpoint
+may be removed after an aborted or failed request leaves it without a socket.
 
 A call without a session ID receives a request-owned session and socket. The
 transport forces `store: false` because that call cannot reuse continuation

@@ -1,12 +1,16 @@
+import { createHash, type Hash } from "node:crypto";
+
 /**
  * Stored-response continuation state for `store: true` sessions.
  *
  * After each terminal response, the stream projects Pi's finalized assistant
  * message through the same Responses converter used for future requests. The
- * session stores the complete Pi-side wire prefix covered by the response.
- * The next request continues only when that entire prefix is still present and
- * unchanged; compaction, edits, missing output, or unknown projection failures
- * fall back to a full-context request without a continuation reference.
+ * session stores the item count and SHA-256 digest of the complete Pi-side wire
+ * prefix covered by the response. The next request continues only when that
+ * entire prefix hashes identically; compaction, edits, missing output, or
+ * unknown projection failures fall back to a full-context request without a
+ * continuation reference. The digest avoids retaining conversation-sized wire
+ * objects between requests.
  *
  * The session uses this state shape for both its latest socket-local head and
  * its durable cross-socket checkpoint. Later terminals on one socket advance
@@ -20,42 +24,83 @@
 
 export type ContinuationState = {
     responseId: string;
-    coveredInput: readonly unknown[];
+    coveredItemCount: number;
+    coveredInputDigest: string;
 };
 
 export type ContinuationRequestContext = {
     fullInput: readonly unknown[];
 };
 
-export function jsonItemsEqual(left: readonly unknown[], right: readonly unknown[]): boolean {
-    if (left === right) {
-        return true;
+export function continuationInputDigest(
+    input: readonly unknown[],
+    itemCount = input.length,
+): string {
+    if (!Number.isSafeInteger(itemCount) || itemCount < 0 || itemCount > input.length) {
+        throw new RangeError("Continuation item count is outside the input range");
     }
-    if (left.length !== right.length) {
-        return false;
-    }
-    return left.every((value, index) => jsonValueEqual(value, right[index]));
+    return digestInputParts([{ input, itemCount }]);
 }
 
-function jsonValueEqual(left: unknown, right: unknown): boolean {
-    if (left === right) {
-        return true;
+function digestInputParts(
+    parts: ReadonlyArray<{ input: readonly unknown[]; itemCount: number }>,
+): string {
+    const hash = createHash("sha256");
+    let totalItemCount = 0;
+    for (const part of parts) {
+        totalItemCount += part.itemCount;
     }
-    if (Array.isArray(left) && Array.isArray(right)) {
-        return jsonItemsEqual(left, right);
+    hash.update(`a${totalItemCount}:`);
+    for (const part of parts) {
+        for (let index = 0; index < part.itemCount; index += 1) {
+            updateJsonDigest(hash, part.input[index]);
+        }
     }
-    if (!isPlainRecord(left) || !isPlainRecord(right)) {
-        return false;
+    return `sha256:${hash.digest("hex")}`;
+}
+
+function updateJsonDigest(hash: Hash, value: unknown): void {
+    if (value === null) {
+        hash.update("z");
+        return;
     }
-    const leftKeys = Object.keys(left);
-    const rightKeys = Object.keys(right);
-    if (leftKeys.length !== rightKeys.length) {
-        return false;
+    if (typeof value === "boolean") {
+        hash.update(value ? "b1" : "b0");
+        return;
     }
-    return leftKeys.every((key) =>
-        Object.prototype.hasOwnProperty.call(right, key) &&
-        jsonValueEqual(left[key], right[key]),
-    );
+    if (typeof value === "number") {
+        const serialized = JSON.stringify(value);
+        if (serialized === undefined) {
+            throw new TypeError("Continuation input must contain only JSON values");
+        }
+        hash.update(`n${serialized};`);
+        return;
+    }
+    if (typeof value === "string") {
+        updateDigestString(hash, "s", value);
+        return;
+    }
+    if (Array.isArray(value)) {
+        hash.update(`a${value.length}:`);
+        for (const item of value) {
+            updateJsonDigest(hash, item);
+        }
+        return;
+    }
+    if (!isPlainRecord(value)) {
+        throw new TypeError("Continuation input must contain only JSON values");
+    }
+    const keys = Object.keys(value).sort();
+    hash.update(`o${keys.length}:`);
+    for (const key of keys) {
+        updateDigestString(hash, "k", key);
+        updateJsonDigest(hash, value[key]);
+    }
+}
+
+function updateDigestString(hash: Hash, tag: "k" | "s", value: string): void {
+    hash.update(`${tag}${value.length}:`);
+    hash.update(value, "utf16le");
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -87,8 +132,19 @@ export function planStoredRequest(
         };
     }
 
-    const prefixIntact = fullInput.length > state.coveredInput.length &&
-        jsonItemsEqual(fullInput.slice(0, state.coveredInput.length), state.coveredInput);
+    const coveredItemCount = state.coveredItemCount;
+    const validCoveredItemCount = Number.isSafeInteger(coveredItemCount) &&
+        coveredItemCount >= 0 &&
+        fullInput.length > coveredItemCount;
+    let prefixIntact = false;
+    if (validCoveredItemCount) {
+        try {
+            prefixIntact = continuationInputDigest(fullInput, coveredItemCount) ===
+                state.coveredInputDigest;
+        } catch {
+            prefixIntact = false;
+        }
+    }
     if (!prefixIntact) {
         return {
             context: { fullInput },
@@ -99,7 +155,7 @@ export function planStoredRequest(
 
     const continued: Record<string, unknown> = {
         ...payload,
-        input: fullInput.slice(state.coveredInput.length),
+        input: fullInput.slice(coveredItemCount),
         previous_response_id: state.responseId,
     };
     return {
@@ -130,7 +186,11 @@ export function nextContinuationState(
     projectedOutput: readonly unknown[],
 ): ContinuationState {
     return {
-        coveredInput: [...context.fullInput, ...projectedOutput],
+        coveredInputDigest: digestInputParts([
+            { input: context.fullInput, itemCount: context.fullInput.length },
+            { input: projectedOutput, itemCount: projectedOutput.length },
+        ]),
+        coveredItemCount: context.fullInput.length + projectedOutput.length,
         responseId: stored.responseId,
     };
 }

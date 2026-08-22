@@ -850,6 +850,44 @@ describe("XaiWsSessionPool stored-response continuation", () => {
         }
     });
 
+    it("verifies continuation against the normalized JSON wire prefix", async () => {
+        const sparse = [] as unknown[];
+        sparse[1] = "present";
+        const firstInput = [{
+            at: new Date("2026-08-22T00:00:00.000Z"),
+            custom: { toJSON: () => ({ normalized: true }) },
+            omitted: undefined,
+            role: "user",
+            sparse,
+            text: "first",
+        }];
+        const normalizedFirstInput = JSON.parse(JSON.stringify(firstInput)) as unknown[];
+        const firstOutput = [{ role: "assistant", text: "answer" }];
+        const secondInput = [
+            ...normalizedFirstInput,
+            ...firstOutput,
+            { role: "user", text: "second" },
+        ];
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            completed(socket, `response-${requestNumber}`);
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, firstOutput));
+            await collect(pool, storedOptions(harness.url, secondInput, []));
+
+            assert.deepEqual(harness.requests[0]?.payload.input, normalizedFirstInput);
+            assert.equal(harness.requests[1]?.payload.previous_response_id, "response-1");
+            assert.deepEqual(harness.requests[1]?.payload.input, [
+                { role: "user", text: "second" },
+            ]);
+            assert.equal(pool.inspect().counters.continuationFallbacks, 0);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
     it("recovers from a repeated socket-local response id using the durable checkpoint suffix", async () => {
         const firstInput = [{ role: "user", text: "first" }];
         const firstOutput = [{ type: "function_call", call_id: "call-1", name: "tool" }];
@@ -1284,6 +1322,31 @@ describe("XaiWsSessionPool stored-response continuation", () => {
             await collect(pool, storedOptions(harness.url, thirdInput, []));
             assert.deepEqual(harness.requests[2]?.payload.input, [{ role: "user", text: "third" }]);
             assert.equal(harness.requests[2]?.payload.previous_response_id, "response-2");
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("falls back when an earlier lone surrogate changes to a replacement character", async () => {
+        const firstInput = [{ role: "user", text: "original-\uD800" }];
+        const firstOutput = [{ role: "assistant", text: "answer" }];
+        const editedInput = [
+            { role: "user", text: "original-\uFFFD" },
+            ...firstOutput,
+            { role: "user", text: "second" },
+        ];
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            completed(socket, `response-${requestNumber}`);
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        try {
+            await collect(pool, storedOptions(harness.url, firstInput, firstOutput));
+            await collect(pool, storedOptions(harness.url, editedInput, []));
+
+            assert.equal(harness.requests[1]?.payload.previous_response_id, undefined);
+            assert.deepEqual(harness.requests[1]?.payload.input, editedInput);
+            assert.equal(pool.inspect().counters.continuationFallbacks, 1);
         } finally {
             pool.closeAll();
             await harness.close();

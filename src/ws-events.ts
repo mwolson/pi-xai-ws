@@ -1067,7 +1067,7 @@ class XaiWsSession {
     ): Record<string, unknown> {
         const plan = planStoredRequestForChain(base, continuation);
         if (plan.resetChain) {
-            debugLog(`continuation reset covered_items=${continuation?.coveredInput.length ?? 0} full_items=${plan.context.fullInput.length}`);
+            debugLog(`continuation reset covered_items=${continuation?.coveredItemCount ?? 0} full_items=${plan.context.fullInput.length}`);
             this.clearContinuation();
             this.counters.continuationFallbacks += 1;
         }
@@ -1110,7 +1110,7 @@ class XaiWsSession {
             }
             this.continuationTransportKey = transportKey;
             debugLog(
-                `continuation stored socket_covered_items=${next.coveredInput.length} durable_covered_items=${this.durableChain?.coveredInput.length ?? 0} projected_items=${projectedOutput.length} durable_advanced=${durableAdvanced}`,
+                `continuation stored socket_covered_items=${next.coveredItemCount} durable_covered_items=${this.durableChain?.coveredItemCount ?? 0} projected_items=${projectedOutput.length} durable_advanced=${durableAdvanced}`,
             );
         } catch {
             this.clearContinuation();

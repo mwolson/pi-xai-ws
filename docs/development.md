@@ -25,7 +25,7 @@ catalog and verifies that `grok-4.6` still resolves to `openai-responses`.
 | `src/provider.ts` | xAI provider registration and API matching. |
 | `src/stream.ts` | Pi stream setup, hooks, output projection, and error completion. |
 | `src/payload.ts` | Pi option preparation, full-context payloads, tools, reasoning, headers, and cache affinity. |
-| `src/continuation.ts` | Stored-response chain planning, covered-prefix checks, and rejection detection. |
+| `src/continuation.ts` | Stored-response chain planning, canonical prefix digests, and rejection detection. |
 | `src/history.ts` | Responses and legacy thinking-signature handling. |
 | `src/config.ts` | Global `getAgentDir()/pi-xai-ws.json` loading, WebSocket URL safety, and environment settings. |
 | `src/liveness.ts` | Ping-on-silence state machine. |
@@ -113,7 +113,7 @@ rules when adding or changing protocol events:
 
 1. A session has one active request.
 2. Default-mode requests carry complete local history. Stored requests carry a
-   verified suffix from the socket-local or durable covered prefix.
+   suffix verified against the socket-local or durable prefix digest.
 3. Only one pre-output transport retry is allowed.
 4. Every event that represents model output disables the internal retry.
 5. A replacement socket replans from the durable checkpoint rather than the
