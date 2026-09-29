@@ -150,6 +150,7 @@ export function streamXaiResponsesWs(
                 output,
                 stream,
                 model,
+                { onProviderStreamEvent: preparedOptions.onProviderStreamEvent },
             );
 
             if (preparedOptions.signal?.aborted) {
