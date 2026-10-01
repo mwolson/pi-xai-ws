@@ -137,9 +137,7 @@ export function buildResponseCreate(
         }
     }
 
-    if (options?.samplingParams) {
-        Object.assign(payload, options.samplingParams);
-    }
+    Object.assign(payload, model.samplingParams, options?.samplingParams);
 
     return payload;
 }

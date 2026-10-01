@@ -430,6 +430,45 @@ describe("stream stored-response continuation", () => {
         }
     });
 
+    it("forwards parsed provider events to Pi's stream event hook", async () => {
+        const server = new WebSocketServer({ port: 0 });
+        await new Promise<void>((resolve) => server.once("listening", resolve));
+        const address = server.address();
+        assert.ok(address && typeof address === "object");
+        process.env.PI_XAI_WS_STORE = "0";
+        process.env.PI_XAI_WS_URL = `ws://127.0.0.1:${address.port}`;
+        server.on("connection", (socket) => {
+            socket.on("message", () => {
+                send(socket, {
+                    response: { id: "response-provider-events" },
+                    type: "response.created",
+                });
+                send(socket, {
+                    response: { id: "response-provider-events", output: [], status: "completed" },
+                    type: "response.completed",
+                });
+            });
+        });
+
+        const seen: string[] = [];
+        try {
+            await collectMessage(
+                responsesModel(),
+                { messages: [{ role: "user", content: "first", timestamp: 1 }] },
+                {
+                    onProviderStreamEvent: (event) => {
+                        seen.push((event as { type: string }).type);
+                    },
+                },
+            );
+
+            assert.deepEqual(seen, ["response.created", "response.completed"]);
+        } finally {
+            defaultXaiWsSessionPool.closeAll();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    });
+
     it("projects real response events before slicing the next Pi payload", async () => {
         const requests: Array<Record<string, unknown>> = [];
         const server = new WebSocketServer({ port: 0 });
