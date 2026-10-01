@@ -232,8 +232,8 @@ A nonempty Pi session ID selects a retained session object. The session allows
 one active model call and queues at most 64 waiting calls. Requests run in order
 so frames from different calls cannot overlap on one socket. The pool does not
 evict durable checkpoints by count. Sessions that hold them remain until process
-exit or explicit pool disposal, preserving continuation across any number of
-session IDs in RAM. The same durable fields are persisted per session id so a
+exit, Pi's `session_shutdown` for that session ID, or explicit pool disposal,
+preserving continuation across any number of session IDs in RAM. The same durable fields are persisted per session id so a
 later process can restore them. Each retained position contains a response ID,
 covered item count, and fixed-size SHA-256 digest rather than conversation content. Its size is
 independent of conversation length, apart from the provider-issued response ID.
@@ -273,6 +273,13 @@ connection-limit frame retires its physical socket, including a frame received
 after a completed response or while the session is idle. A session also closes
 its socket after five idle minutes by default, but keeps its durable
 continuation checkpoint for the next connection.
+
+Pi sends `session_shutdown` on quit, reload, `/new`, `/resume`, and fork. The
+extension then disposes the pool entry for that Pi session ID and closes its
+socket at once, so print-mode runs such as `pi -p` exit when the agent settles
+instead of after the idle timeout. Other session IDs in the same process keep
+their sockets. The on-disk checkpoint remains, and a later request with the same
+session ID restores it.
 
 ## Liveness
 

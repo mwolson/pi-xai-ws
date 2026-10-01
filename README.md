@@ -180,6 +180,8 @@ session-limit notice.
   permanent. A real user turn re-arms the budget and the cooldown; hidden steers
   do not, so an unattended session keeps its bound.
 - Sockets enable TCP keepalive and have fixed memory, age, and idle bounds.
+  Pi's session shutdown closes that session's socket, so `pi -p` exits as soon
+  as the run settles.
 
 See [Transport design](docs/transport.md) for payload construction, lifecycle,
 liveness, replay rules, resource bounds, and Pi integration details.

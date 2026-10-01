@@ -5,6 +5,7 @@ import { registerLoopRecovery } from "./loop-recovery.ts";
 import { registerXaiProvider } from "./provider.ts";
 import { registerStoredContextSafety } from "./stored-context.ts";
 import { streamXaiResponsesWs } from "./stream.ts";
+import { registerXaiWsShutdown } from "./ws-events.ts";
 
 export default function (pi: ExtensionAPI) {
     registerXaiProvider(pi, streamXaiResponsesWs);
@@ -12,4 +13,5 @@ export default function (pi: ExtensionAPI) {
     registerImageOmissionTracking(pi);
     registerEmptyThinkingNudge(pi);
     registerLoopRecovery(pi);
+    registerXaiWsShutdown(pi);
 }

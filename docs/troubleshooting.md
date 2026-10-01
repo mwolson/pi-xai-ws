@@ -268,7 +268,8 @@ calls.
 
 The pool intentionally does not evict durable checkpoints by count. A
 long-lived process that stores responses for many distinct session IDs retains
-their checkpoint metadata in RAM until process exit or explicit pool disposal,
+their checkpoint metadata in RAM until process exit, Pi session shutdown, or
+explicit pool disposal,
 and on disk under `pi-xai-ws/continuations/` until the session jsonl is gone or
 the checkpoint is older than 30 days. Each
 checkpoint keeps a response ID, covered item count, and SHA-256 digest rather

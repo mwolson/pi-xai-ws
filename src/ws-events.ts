@@ -1,4 +1,5 @@
 import type { IncomingHttpHeaders } from "node:http";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import WebSocket from "ws";
 import {
     resolveLivenessTimeoutMs,
@@ -1404,6 +1405,16 @@ export class XaiWsSessionPool {
         }
     }
 
+    closeSession(sessionId: string | undefined): void {
+        const key = sessionId?.trim();
+        const session = key ? this.sessionsById.get(key) : undefined;
+        if (!key || !session) {
+            return;
+        }
+        this.sessionsById.delete(key);
+        session.dispose();
+    }
+
     closeAll(): void {
         for (const session of this.sessionsById.values()) {
             session.dispose();
@@ -1436,6 +1447,15 @@ export class XaiWsSessionPool {
 }
 
 export const defaultXaiWsSessionPool = new XaiWsSessionPool();
+
+export function registerXaiWsShutdown(
+    pi: Pick<ExtensionAPI, "on">,
+    pool: XaiWsSessionPool = defaultXaiWsSessionPool,
+): void {
+    pi.on("session_shutdown", (_event: unknown, ctx: ExtensionContext) => {
+        pool.closeSession(ctx.sessionManager.getSessionId());
+    });
+}
 
 export async function* iterateXaiWsSessionEvents(
     options: XaiWsSessionEventsOptions,

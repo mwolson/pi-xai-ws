@@ -3,7 +3,11 @@ import { createServer } from "node:http";
 import { Socket } from "node:net";
 import { describe, it } from "node:test";
 import { WebSocketServer, type WebSocket } from "ws";
-import { XaiWsSessionPool, type XaiWsSessionEventsOptions } from "../src/ws-events.ts";
+import {
+    registerXaiWsShutdown,
+    XaiWsSessionPool,
+    type XaiWsSessionEventsOptions,
+} from "../src/ws-events.ts";
 
 type RequestRecord = {
     connection: number;
@@ -915,6 +919,39 @@ describe("XaiWsSessionPool", () => {
 
             assert.equal(harness.connectionCount(), 2);
             assert.equal(harness.requests[1]?.payload.previous_response_id, undefined);
+        } finally {
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
+    it("closes only the shutting-down session's socket on session_shutdown", async () => {
+        const harness = await createHarness((socket, _payload, requestNumber) => {
+            completed(socket, `response-${requestNumber}`);
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+        registerXaiWsShutdown({
+            on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => {
+                handlers.set(name, handler);
+            },
+        } as unknown as Parameters<typeof registerXaiWsShutdown>[0], pool);
+        try {
+            await collect(pool, requestOptions(harness.url, [{ role: "user", text: "first" }], "session-a"));
+            await collect(pool, requestOptions(harness.url, [{ role: "user", text: "other" }], "session-b"));
+            assert.equal(pool.inspect().openSockets, 2);
+
+            handlers.get("session_shutdown")?.(
+                { reason: "quit", type: "session_shutdown" },
+                { sessionManager: { getSessionId: () => "session-a" } },
+            );
+
+            assert.deepEqual(
+                { openSockets: pool.inspect().openSockets, sessions: pool.inspect().sessions },
+                { openSockets: 1, sessions: 1 },
+            );
+            await collect(pool, requestOptions(harness.url, [{ role: "user", text: "again" }], "session-a"));
+            assert.equal(harness.connectionCount(), 3);
         } finally {
             pool.closeAll();
             await harness.close();
