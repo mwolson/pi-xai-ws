@@ -232,19 +232,16 @@ intended tag.
 ## 9. Upgrade and verify Pi discovery
 
 Update the installed package. When `npm` is backed by aube, its
-`minimumPackageAge` would hold back a release published minutes ago, so
-disable it for this install:
+`minimumReleaseAge` (24 hours by default) skips a version published minutes ago
+and quietly installs the previous release, so disable it for this install:
 
 ```sh
-AUBE_MINIMUM_PACKAGE_AGE=0 pi update npm:@mwolson-org/pi-xai-ws
+AUBE_MINIMUM_RELEASE_AGE=0 pi update npm:@mwolson-org/pi-xai-ws
 node -p 'require(process.env.HOME + "/.pi/agent/npm/node_modules/@mwolson-org/pi-xai-ws/package.json").version'
 ```
 
 Pi reports the package as updated even when the version did not change, so
-check the printed version. If it is still the previous release while
-`npm view @mwolson-org/pi-xai-ws version` shows the new one, npm's full
-package metadata is still catching up. Wait a few minutes and rerun both
-commands.
+check that the printed version is the new release.
 
 Start a fresh Pi process and a fresh session. Confirm that Pi discovers the new
 package version and resolves `xai/grok-4.7` to the extension's
