@@ -50,18 +50,6 @@ describe("Responses payload tools", () => {
         assert.equal(declared[0]?.name, "bash");
     });
 
-    it("still declares Context.tools for hosts without transcript declarations", () => {
-        const payload = buildResponseCreate(responsesModel(), {
-            ...context(),
-            tools: [tool],
-        } as Context);
-
-        const declared = payload.tools as Array<Record<string, unknown>> | undefined;
-        assert.ok(Array.isArray(declared));
-        assert.equal(declared.length, 1);
-        assert.equal(declared[0]?.name, "bash");
-    });
-
     it("omits the tools field when the request declares none", () => {
         assert.equal(buildResponseCreate(responsesModel(), context()).tools, undefined);
     });

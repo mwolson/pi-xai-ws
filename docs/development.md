@@ -80,7 +80,7 @@ declares no tools, and Grok writes tool calls as prose instead of calling them.
 
 Compile against current Pi packages in `devDependencies` so `npm test` exercises
 that contract. `tests/payload.test.ts` covers a transcript `toolsAdded` system
-message and a `Context.tools` fallback.
+message.
 
 A host event may narrow a message type to a single role. Compare such a field
 through a widened local instead of an inline literal.

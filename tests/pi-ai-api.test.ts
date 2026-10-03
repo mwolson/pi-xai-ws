@@ -18,7 +18,7 @@ import {
     convertResponsesMessagesFn,
     convertResponsesToolsFn,
     processResponsesStreamFn,
-    requestToolsForContext,
+    resolveRequestToolsFn,
     resolvePiAiApiFile,
     resolvePiAiDistFile,
 } from "../src/pi-ai-api.ts";
@@ -90,39 +90,8 @@ describe("pi-ai API compatibility loader", () => {
         }
     });
 
-    it("reads tool declarations from a transcript system message", () => {
-        const declared = [{ name: "bash" }];
-        const tools = requestToolsForContext(
-            { messages: [{ role: "system", toolsAdded: declared }] },
-            () => ({ requestTools: declared }),
-        );
-        assert.deepEqual(tools, declared);
-    });
-
-    it("falls back to Context.tools when the transcript declares no tools", () => {
-        const legacy = [{ name: "bash" }];
-        assert.deepEqual(
-            requestToolsForContext(
-                { messages: [{ role: "user" }], tools: legacy },
-                () => ({ requestTools: [] }),
-            ),
-            legacy,
-        );
-        assert.deepEqual(requestToolsForContext({ messages: [], tools: legacy }), legacy);
-    });
-
-    it("survives a transcript helper that throws", () => {
-        const legacy = [{ name: "bash" }];
-        assert.deepEqual(
-            requestToolsForContext({ messages: [], tools: legacy }, () => {
-                throw new Error("host helper failed");
-            }),
-            legacy,
-        );
-    });
-
-    it("declares no tools when neither shape carries any", () => {
-        assert.deepEqual(requestToolsForContext({ messages: [] }, undefined), []);
+    it("declares no tools when the transcript declares none", () => {
+        assert.deepEqual(resolveRequestToolsFn({ messages: [] }), []);
     });
 
     it("loads the extension through Pi's jiti resolver", async () => {

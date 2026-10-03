@@ -135,38 +135,9 @@ type TranscriptToolsResolver = (
  * silently declares no tools at all, which makes Grok improvise tool calls as
  * prose instead of calling them.
  */
-export function resolveRequestToolsFn(context: {
-    messages?: readonly unknown[];
-    tools?: readonly unknown[];
-}): readonly unknown[] {
-    return requestToolsForContext(context, resolveTranscriptTools as TranscriptToolsResolver);
-}
-
-/**
- * Exported for tests: resolves the request tool list against an explicit
- * resolver so both host shapes can be covered without a live Pi install.
- */
-export function requestToolsForContext(
-    context: {
-        messages?: readonly unknown[];
-        tools?: readonly unknown[];
-    },
-    resolveTranscriptToolsFn?: TranscriptToolsResolver,
-): readonly unknown[] {
-    if (resolveTranscriptToolsFn) {
-        try {
-            // The transport declares one complete tool list at the top level, so
-            // it never anchors later additions at an individual message.
-            const resolved = resolveTranscriptToolsFn(context.messages ?? [], false);
-            const declared = resolved?.requestTools;
-            // An empty result means this host did not fold tool declarations into
-            // the transcript, so a caller-supplied `Context.tools` still wins.
-            if (Array.isArray(declared) && declared.length > 0) {
-                return declared;
-            }
-        } catch {
-            // Fall through to the legacy shape below.
-        }
-    }
-    return context.tools ?? [];
+export function resolveRequestToolsFn(context: { messages?: readonly unknown[] }): readonly unknown[] {
+    // The transport declares one complete tool list at the top level, so it
+    // never anchors later additions at an individual message.
+    const resolved = (resolveTranscriptTools as TranscriptToolsResolver)(context.messages ?? [], false);
+    return resolved?.requestTools ?? [];
 }

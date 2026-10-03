@@ -250,16 +250,20 @@ describe("stream stored-response continuation", () => {
             const bulkyDescription = "x".repeat(900_000);
             await collectMessage(model, {
                 messages: [
+                    {
+                        role: "system",
+                        content: "",
+                        toolsAdded: [{
+                            name: "bulk",
+                            description: bulkyDescription,
+                            parameters: { type: "object", properties: {} },
+                        }],
+                    },
                     user,
                     first,
                     { role: "user", content: "ok; remind me", timestamp: 2 },
                 ],
-                tools: [{
-                    name: "bulk",
-                    description: bulkyDescription,
-                    parameters: { type: "object", properties: {} },
-                }] as Context["tools"],
-            });
+            } as unknown as Context);
 
             assert.equal(requests.length, 2);
             assert.equal(requests[0]?.store, true);
