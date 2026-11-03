@@ -343,6 +343,25 @@ function isModelOutputEvent(event: Record<string, unknown>): boolean {
     return OUTPUT_EVENT_PREFIXES.some((prefix) => type.startsWith(prefix));
 }
 
+/**
+ * Whether an event is safe to re-emit on a reasoning-only stream replay: it
+ * is not model output at all, or it belongs to the reasoning family that only
+ * feeds thinking blocks. Provider-tool lifecycle events carry observable side
+ * effects through provider-stream hooks even when they add no content block,
+ * so they disqualify a replay.
+ */
+export function isReasoningOnlyOutputEvent(event: Record<string, unknown>): boolean {
+    const type = typeof event.type === "string" ? event.type : "";
+    if (type.startsWith("response.reasoning")) {
+        return true;
+    }
+    if (type === "response.output_item.added" || type === "response.output_item.done") {
+        const item = event.item as { type?: unknown } | undefined;
+        return item?.type === "reasoning";
+    }
+    return !isModelOutputEvent(event);
+}
+
 function eventErrorCode(event: Record<string, unknown>): string | undefined {
     if (event.type !== "error") {
         return undefined;

@@ -83,6 +83,7 @@ model output begins.
 | `PI_XAI_WS_MAX_STORED_CONTEXT_TOKENS`       | unset                                                                 | Optional preemptive stored-mode cutoff. At or above this estimated stored conversation size, calls switch to `store: false` until compaction. Unset means keep storing until xAI rejects a response as too large. |
 | `PI_XAI_WS_MAX_REQUEST_IMAGE_BYTES`         | `8388608`                                                             | Newest-first budget for image bytes on the wire. Older screenshots become short placeholders so full-history requests stay under xAI's WebSocket size limit. Once omitted in a session, a screenshot stays omitted. |
 | `PI_XAI_WS_STORE`                           | unset                                                                 | Override stored-response continuation. `1` or `true` enables it; any other defined value disables it.                                          |
+| `PI_XAI_WS_REASONING_REPLAY`                | `1`                                                                   | One in-turn reconnect when a replayable socket failure interrupts a response that has only streamed reasoning; disabled with `0` or `false`.                                          |
 | `PI_XAI_WS_DEBUG`                           | unset                                                                 | Set to `1` for lifecycle, request-shape, and recovery diagnostics. Logs exclude request data, credentials, generated text, and tool arguments. |
 
 With `cacheRetention: "none"`, the extension omits `prompt_cache_key` and
@@ -165,7 +166,12 @@ session-limit notice.
 - The extension retains Pi's token limits, sampling options, payload hooks,
   response hooks, tool behavior, and error projection.
 - Connect, socket, liveness, or xAI connection-limit failures may retry once
-  before model output begins. Stored continuation rebuilds that retry from its
+  before model output begins. When such a failure interrupts a response that
+  has only streamed reasoning, the stream layer additionally clears the
+  partial message and reconnects once inside the same turn, avoiding a visible
+  turn error when recovery succeeds; `PI_XAI_WS_REASONING_REPLAY=0` disables
+  that extra replay. A replayed attempt resends full local history, and
+  provider-stream hooks observe both attempts. Stored continuation rebuilds that retry from its
   durable checkpoint rather than assuming a repeated socket-local response ID
   identifies the latest state on a replacement socket.
 - If a Grok assistant message in the current agent run is only thinking, with

@@ -18,6 +18,7 @@ import {
 const previousStore = process.env.PI_XAI_WS_STORE;
 const previousThreshold = process.env.PI_XAI_WS_MAX_STORED_CONTEXT_TOKENS;
 const previousUrl = process.env.PI_XAI_WS_URL;
+const previousReplay = process.env.PI_XAI_WS_REASONING_REPLAY;
 
 afterEach(() => {
     defaultXaiWsSessionPool.closeAll();
@@ -35,6 +36,11 @@ afterEach(() => {
         delete process.env.PI_XAI_WS_URL;
     } else {
         process.env.PI_XAI_WS_URL = previousUrl;
+    }
+    if (previousReplay === undefined) {
+        delete process.env.PI_XAI_WS_REASONING_REPLAY;
+    } else {
+        process.env.PI_XAI_WS_REASONING_REPLAY = previousReplay;
     }
 });
 
@@ -554,6 +560,434 @@ describe("stream stored-response continuation", () => {
                 output: "ok",
                 type: "function_call_output",
             }]);
+        } finally {
+            defaultXaiWsSessionPool.closeAll();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    });
+});
+
+describe("stream reasoning-only replay", () => {
+    function reasoningAttempt(fail: boolean): Array<Record<string, unknown>> {
+        const events: Array<Record<string, unknown>> = [
+            { type: "response.created", response: { id: fail ? "resp-fail" : "resp-ok" } },
+            {
+                item: { id: `rs-${fail ? "1" : "2"}`, type: "reasoning" },
+                output_index: 0,
+                type: "response.output_item.added",
+            },
+        ];
+        if (fail) {
+            events.push({
+                delta: "attempt one thinking",
+                output_index: 0,
+                type: "response.reasoning_text.delta",
+            });
+            return events;
+        }
+        events.push(
+            {
+                delta: "attempt two thinking",
+                output_index: 0,
+                type: "response.reasoning_text.delta",
+            },
+            {
+                item: { id: "msg-1", type: "message" },
+                output_index: 1,
+                type: "response.output_item.added",
+            },
+            {
+                delta: "final answer",
+                output_index: 1,
+                type: "response.output_text.delta",
+            },
+            {
+                response: { id: "resp-ok", output: [], status: "completed" },
+                type: "response.completed",
+            },
+        );
+        return events;
+    }
+
+    function stubIterate(
+        script: (call: number) => { events: Array<Record<string, unknown>>; error?: Error },
+    ): {
+        calls: () => number;
+        restore: () => void;
+    } {
+        const originalIterate = defaultXaiWsSessionPool.iterate;
+        let callCount = 0;
+        defaultXaiWsSessionPool.iterate = async function* () {
+            callCount += 1;
+            const step = script(callCount);
+            for (const event of step.events) {
+                yield event;
+            }
+            if (step.error) {
+                throw step.error;
+            }
+        };
+        return {
+            calls: () => callCount,
+            restore: () => {
+                defaultXaiWsSessionPool.iterate = originalIterate;
+            },
+        };
+    }
+
+    const socketDrop = (): XaiWsTransportError =>
+        new XaiWsTransportError("xAI WebSocket closed (1006)", {
+            kind: "socket",
+            outputStarted: true,
+        });
+
+    it("replays once when only reasoning streamed and recovers", async () => {
+        process.env.PI_XAI_WS_STORE = "0";
+        process.env.PI_XAI_WS_REASONING_REPLAY = "1";
+        const stub = stubIterate((call) =>
+            call === 1
+                ? { events: reasoningAttempt(true), error: socketDrop() }
+                : { events: reasoningAttempt(false) },
+        );
+        try {
+            const message = await collectMessage(
+                responsesModel(),
+                { messages: [{ role: "user", content: "first", timestamp: 1 }] },
+                { sessionId: "stream-replay-recover" },
+            );
+
+            assert.equal(stub.calls(), 2);
+            assert.equal(message.responseId, "resp-ok");
+            assert.notEqual(message.stopReason, "error");
+            const thinking = message.content.filter((block) => block.type === "thinking");
+            const texts = message.content.filter((block) => block.type === "text");
+            assert.equal(thinking.length, 1);
+            assert.deepEqual(thinking[0], { type: "thinking", thinking: "attempt two thinking" });
+            assert.equal(texts.length, 1);
+            assert.deepEqual(texts[0], { type: "text", text: "final answer" });
+        } finally {
+            stub.restore();
+        }
+    });
+
+    it("does not replay after text streamed", async () => {
+        process.env.PI_XAI_WS_STORE = "0";
+        const stub = stubIterate((call) => {
+            if (call > 1) {
+                return { events: reasoningAttempt(false) };
+            }
+            return {
+                events: [
+                    ...reasoningAttempt(true),
+                    {
+                        item: { id: "msg-early", type: "message" },
+                        output_index: 1,
+                        type: "response.output_item.added",
+                    },
+                    {
+                        delta: "committed text",
+                        output_index: 1,
+                        type: "response.output_text.delta",
+                    },
+                ],
+                error: socketDrop(),
+            };
+        });
+        try {
+            await assert.rejects(
+                () => collectMessage(
+                    responsesModel(),
+                    { messages: [{ role: "user", content: "first", timestamp: 1 }] },
+                    { sessionId: "stream-replay-after-text" },
+                ),
+                /WebSocket error: xAI WebSocket closed \(1006\)/,
+            );
+            assert.equal(stub.calls(), 1);
+        } finally {
+            stub.restore();
+        }
+    });
+
+    it("does not replay when no model output started", async () => {
+        process.env.PI_XAI_WS_STORE = "0";
+        const stub = stubIterate(() => ({
+            events: [],
+            error: new XaiWsTransportError("xAI WebSocket closed (1006)", {
+                kind: "socket",
+                outputStarted: false,
+            }),
+        }));
+        try {
+            await assert.rejects(
+                () => collectMessage(
+                    responsesModel(),
+                    { messages: [{ role: "user", content: "first", timestamp: 1 }] },
+                    { sessionId: "stream-replay-pre-output" },
+                ),
+                /WebSocket error: xAI WebSocket closed \(1006\)/,
+            );
+            assert.equal(stub.calls(), 1);
+        } finally {
+            stub.restore();
+        }
+    });
+
+    it("replays at most once", async () => {
+        process.env.PI_XAI_WS_STORE = "0";
+        let callCount = 0;
+        const originalIterate = defaultXaiWsSessionPool.iterate;
+        defaultXaiWsSessionPool.iterate = async function* () {
+            callCount += 1;
+            for (const event of reasoningAttempt(true)) {
+                yield event;
+            }
+            throw new XaiWsTransportError("xAI WebSocket closed (1006)", {
+                kind: "socket",
+                outputStarted: true,
+            });
+        };
+        try {
+            await assert.rejects(
+                () => collectMessage(
+                    responsesModel(),
+                    { messages: [{ role: "user", content: "first", timestamp: 1 }] },
+                    { sessionId: "stream-replay-bounded" },
+                ),
+                /WebSocket error: xAI WebSocket closed \(1006\)/,
+            );
+            assert.equal(callCount, 2);
+        } finally {
+            defaultXaiWsSessionPool.iterate = originalIterate;
+        }
+    });
+
+    it("respects PI_XAI_WS_REASONING_REPLAY=0", async () => {
+        process.env.PI_XAI_WS_STORE = "0";
+        process.env.PI_XAI_WS_REASONING_REPLAY = "0";
+        let callCount = 0;
+        const originalIterate = defaultXaiWsSessionPool.iterate;
+        defaultXaiWsSessionPool.iterate = async function* () {
+            callCount += 1;
+            for (const event of reasoningAttempt(true)) {
+                yield event;
+            }
+            throw new XaiWsTransportError("xAI WebSocket closed (1006)", {
+                kind: "socket",
+                outputStarted: true,
+            });
+        };
+        try {
+            await assert.rejects(
+                () => collectMessage(
+                    responsesModel(),
+                    { messages: [{ role: "user", content: "first", timestamp: 1 }] },
+                    { sessionId: "stream-replay-disabled" },
+                ),
+                /WebSocket error: xAI WebSocket closed \(1006\)/,
+            );
+            assert.equal(callCount, 1);
+        } finally {
+            defaultXaiWsSessionPool.iterate = originalIterate;
+        }
+    });
+
+    it("does not replay after provider-tool activity", async () => {
+        process.env.PI_XAI_WS_STORE = "0";
+        process.env.PI_XAI_WS_REASONING_REPLAY = "1";
+        const stub = stubIterate((call) => {
+            if (call > 1) {
+                return { events: reasoningAttempt(false) };
+            }
+            return {
+                events: [
+                    ...reasoningAttempt(true),
+                    { type: "response.web_search_call.in_progress" },
+                ],
+                error: socketDrop(),
+            };
+        });
+        try {
+            await assert.rejects(
+                () => collectMessage(
+                    responsesModel(),
+                    { messages: [{ role: "user", content: "first", timestamp: 1 }] },
+                    { sessionId: "stream-replay-provider-tool" },
+                ),
+                /WebSocket error: xAI WebSocket closed \(1006\)/,
+            );
+            assert.equal(stub.calls(), 1);
+        } finally {
+            stub.restore();
+        }
+    });
+
+    it("does not replay when the request aborted during the failure", async () => {
+        process.env.PI_XAI_WS_STORE = "0";
+        process.env.PI_XAI_WS_REASONING_REPLAY = "1";
+        let callCount = 0;
+        const controller = new AbortController();
+        const originalIterate = defaultXaiWsSessionPool.iterate;
+        defaultXaiWsSessionPool.iterate = async function* () {
+            callCount += 1;
+            for (const event of reasoningAttempt(true)) {
+                yield event;
+            }
+            controller.abort();
+            throw socketDrop();
+        };
+        try {
+            await assert.rejects(
+                () => collectMessage(
+                    responsesModel(),
+                    { messages: [{ role: "user", content: "first", timestamp: 1 }] },
+                    { sessionId: "stream-replay-aborted", signal: controller.signal },
+                ),
+                /WebSocket error: xAI WebSocket closed \(1006\)/,
+            );
+            assert.equal(callCount, 1);
+        } finally {
+            defaultXaiWsSessionPool.iterate = originalIterate;
+        }
+    });
+
+    it("resends full local history without stored continuation when replaying in stored mode", async () => {
+        const server = new WebSocketServer({ port: 0 });
+        await new Promise<void>((resolve) => server.once("listening", resolve));
+        const address = server.address();
+        assert.ok(address && typeof address === "object");
+        const requests: Array<Record<string, unknown>> = [];
+        let connections = 0;
+        server.on("connection", (socket) => {
+            connections += 1;
+            socket.on("message", (frame) => {
+                requests.push(JSON.parse(frame.toString()) as Record<string, unknown>);
+                if (connections === 1) {
+                    send(socket, {
+                        type: "response.created",
+                        response: { id: "resp-stored-drop" },
+                    });
+                    send(socket, {
+                        item: { id: "rs-stored-drop", type: "reasoning" },
+                        output_index: 0,
+                        type: "response.output_item.added",
+                    });
+                    send(socket, {
+                        delta: "stored thinking before the drop",
+                        output_index: 0,
+                        type: "response.reasoning_text.delta",
+                    });
+                    socket.terminate();
+                    return;
+                }
+                send(socket, {
+                    response: { id: "resp-stored-recovered", output: [], status: "completed" },
+                    type: "response.completed",
+                });
+            });
+        });
+        process.env.PI_XAI_WS_STORE = "1";
+        process.env.PI_XAI_WS_REASONING_REPLAY = "1";
+        process.env.PI_XAI_WS_URL = `ws://127.0.0.1:${address.port}`;
+
+        try {
+            const message = await collectMessage(
+                responsesModel(),
+                { messages: [{ role: "user", content: "stored replay", timestamp: 1 }] },
+                { sessionId: "stream-replay-stored-mode" },
+            );
+
+            assert.equal(connections, 2);
+            assert.notEqual(message.stopReason, "error");
+            assert.equal(requests.length, 2);
+            assert.equal(requests[0]?.store, true);
+            assert.equal(requests[1]?.store, true);
+            assert.equal(requests[1]?.previous_response_id, undefined);
+            const secondInput = requests[1]?.input as Array<Record<string, unknown>>;
+            assert.ok(Array.isArray(secondInput));
+            assert.ok(secondInput.some((item) => item.role === "user"));
+        } finally {
+            defaultXaiWsSessionPool.closeAll();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    });
+
+    it("recovers from an abrupt mid-reasoning socket drop on a real socket", async () => {
+        process.env.PI_XAI_WS_REASONING_REPLAY = "1";
+        const server = new WebSocketServer({ port: 0 });
+        await new Promise<void>((resolve) => server.once("listening", resolve));
+        const address = server.address();
+        assert.ok(address && typeof address === "object");
+        let connections = 0;
+        server.on("connection", (socket) => {
+            connections += 1;
+            socket.once("message", () => {
+                if (connections === 1) {
+                    send(socket, {
+                        type: "response.created",
+                        response: { id: "resp-dropped" },
+                    });
+                    send(socket, {
+                        item: { id: "rs-drop", type: "reasoning" },
+                        output_index: 0,
+                        type: "response.output_item.added",
+                    });
+                    send(socket, {
+                        delta: "thinking before the drop",
+                        output_index: 0,
+                        type: "response.reasoning_text.delta",
+                    });
+                    socket.terminate();
+                    return;
+                }
+                send(socket, {
+                    type: "response.created",
+                    response: { id: "resp-recovered" },
+                });
+                send(socket, {
+                    item: { id: "rs-recovered", type: "reasoning" },
+                    output_index: 0,
+                    type: "response.output_item.added",
+                });
+                send(socket, {
+                    delta: "thinking after reconnect",
+                    output_index: 0,
+                    type: "response.reasoning_text.delta",
+                });
+                send(socket, {
+                    item: { id: "msg-recovered", type: "message" },
+                    output_index: 1,
+                    type: "response.output_item.added",
+                });
+                send(socket, {
+                    delta: "recovered answer",
+                    output_index: 1,
+                    type: "response.output_text.delta",
+                });
+                send(socket, {
+                    response: { id: "resp-recovered", output: [], status: "completed" },
+                    type: "response.completed",
+                });
+            });
+        });
+        process.env.PI_XAI_WS_STORE = "0";
+        process.env.PI_XAI_WS_URL = `ws://127.0.0.1:${address.port}`;
+
+        try {
+            const message = await collectMessage(
+                responsesModel(),
+                { messages: [{ role: "user", content: "first", timestamp: 1 }] },
+                { sessionId: "stream-replay-real-socket" },
+            );
+
+            assert.equal(connections, 2);
+            assert.equal(message.responseId, "resp-recovered");
+            assert.notEqual(message.stopReason, "error");
+            const thinking = message.content.filter((block) => block.type === "thinking");
+            const texts = message.content.filter((block) => block.type === "text");
+            assert.equal(thinking.length, 1);
+            assert.deepEqual(thinking[0], { type: "thinking", thinking: "thinking after reconnect" });
+            assert.equal(texts.length, 1);
+            assert.deepEqual(texts[0], { type: "text", text: "recovered answer" });
         } finally {
             defaultXaiWsSessionPool.closeAll();
             await new Promise<void>((resolve) => server.close(() => resolve()));
