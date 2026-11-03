@@ -6,6 +6,7 @@ import {
     type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import {
+    reasoningReplayEnabled,
     resolveMaxRequestImageBytes,
     resolveMaxStoredContextTokens,
     resolveRequestLiveness,
@@ -30,10 +31,79 @@ import {
     setStoredContextSafetyActive,
 } from "./stored-context.ts";
 import {
+    isReasoningOnlyOutputEvent,
     isReplayableTransportError,
     iterateXaiWsSessionEvents,
     normalizeWireRecordWithSize,
 } from "./ws-events.ts";
+
+function freshUsage(): AssistantMessage["usage"] {
+    return {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+}
+
+/**
+ * Pi consumes `partial` events as snapshots of one mutated AssistantMessage,
+ * so clearing the partial before an in-turn replay keeps the final message and
+ * the streaming view consistent without ending the stream.
+ */
+function resetPartialForReplay(output: AssistantMessage): void {
+    output.content = [];
+    output.responseId = undefined;
+    output.stopReason = "pending";
+    output.errorMessage = undefined;
+    (output as { rawStopReason?: unknown }).rawStopReason = undefined;
+    output.usage = freshUsage();
+}
+
+/**
+ * Tracks whether every raw event observed so far in the current attempt is
+ * safe to re-emit on a replay: no text, tool calls, refusals, or provider-tool
+ * lifecycle activity, only reasoning-family events. Provider-tool events are
+ * observable through provider-stream hooks even when they add no content
+ * block, so they must disqualify the replay on their own.
+ */
+class ReplayEligibility {
+    private reasoningOnly = true;
+
+    observe(event: Record<string, unknown>): void {
+        if (!isReasoningOnlyOutputEvent(event)) {
+            this.reasoningOnly = false;
+        }
+    }
+
+    get eligible(): boolean {
+        return this.reasoningOnly;
+    }
+}
+
+/**
+ * A replayable transport failure after only reasoning blocks streamed can be
+ * recovered inside the same Pi turn: reasoning has no committed text or tool
+ * calls, and Pi rebuilds the partial message from snapshots. One silent
+ * reconnect here avoids a visible turn error and Pi's much slower outer retry
+ * when it succeeds. Anything the user or hooks could already have observed
+ * beyond reasoning disqualifies the replay and leaves recovery to Pi.
+ */
+function isReasoningOnlyReplayable(
+    error: unknown,
+    output: AssistantMessage,
+    eligibility: ReplayEligibility,
+    signal?: AbortSignal,
+): boolean {
+    return signal?.aborted !== true &&
+        eligibility.eligible &&
+        isReplayableTransportError(error) &&
+        error.outputStarted &&
+        output.content.length > 0 &&
+        output.content.every((block) => block.type === "thinking");
+}
 
 export function streamXaiResponsesWs(
     model: Model<"openai-responses">,
@@ -49,14 +119,7 @@ export function streamXaiResponsesWs(
             api: model.api,
             provider: model.provider,
             model: model.id,
-            usage: {
-                input: 0,
-                output: 0,
-                cacheRead: 0,
-                cacheWrite: 0,
-                totalTokens: 0,
-                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: freshUsage(),
             stopReason: "pending",
             timestamp: Date.now(),
         };
@@ -123,35 +186,71 @@ export function streamXaiResponsesWs(
                     `[pi-xai-ws] timeouts connect_ms=${preparedOptions.websocketConnectTimeoutMs ?? "default"} ping_ms=${requestLiveness.pingIntervalMs} idle_after_ping_ms=${requestLiveness.livenessTimeoutMs}\n`,
                 );
             }
-            const events = iterateXaiWsSessionEvents({
-                url: resolveWsUrl(model.baseUrl),
-                headers: upgradeHeaders(apiKey, preparedOptions),
-                createPayload: payload,
-                sessionId: preparedOptions.sessionId,
-                signal: preparedOptions.signal,
-                connectTimeoutMs: preparedOptions.websocketConnectTimeoutMs,
-                livenessTimeoutMs: requestLiveness.livenessTimeoutMs,
-                pingIntervalMs: requestLiveness.pingIntervalMs,
-                onOpen: (response) => preparedOptions.onResponse?.(response, model),
-                projectStoredOutput: () => {
+            let reasoningOnlyReplays = 0;
+            let responseReported = false;
+            while (true) {
+                const eligibility = new ReplayEligibility();
+                const events = iterateXaiWsSessionEvents({
+                    url: resolveWsUrl(model.baseUrl),
+                    headers: upgradeHeaders(apiKey, preparedOptions),
+                    createPayload: payload,
+                    sessionId: preparedOptions.sessionId,
+                    signal: preparedOptions.signal,
+                    connectTimeoutMs: preparedOptions.websocketConnectTimeoutMs,
+                    livenessTimeoutMs: requestLiveness.livenessTimeoutMs,
+                    pingIntervalMs: requestLiveness.pingIntervalMs,
+                    onOpen: async (response) => {
+                        if (responseReported) {
+                            return;
+                        }
+                        responseReported = true;
+                        await preparedOptions.onResponse?.(response, model);
+                    },
+                    projectStoredOutput: () => {
+                        if (
+                            output.stopReason === "pending" ||
+                            output.stopReason === "error" ||
+                            output.stopReason === "aborted"
+                        ) {
+                            return undefined;
+                        }
+                        return projectAssistantResponse(model, output);
+                    },
+                    storeResponses,
+                });
+                try {
+                    await processResponsesStreamFn(
+                        events as Parameters<typeof processResponsesStreamFn>[0],
+                        output,
+                        stream,
+                        model,
+                        {
+                            onProviderStreamEvent: async (event, eventModel) => {
+                                eligibility.observe(event as Record<string, unknown>);
+                                await preparedOptions.onProviderStreamEvent?.(event, eventModel);
+                            },
+                        },
+                    );
+                } catch (error) {
                     if (
-                        output.stopReason === "pending" ||
-                        output.stopReason === "error" ||
-                        output.stopReason === "aborted"
+                        reasoningOnlyReplays < 1 &&
+                        reasoningReplayEnabled() &&
+                        isReasoningOnlyReplayable(error, output, eligibility, preparedOptions.signal)
                     ) {
-                        return undefined;
+                        reasoningOnlyReplays += 1;
+                        if (process.env.PI_XAI_WS_DEBUG === "1") {
+                            const reason = error instanceof Error ? error.message : String(error);
+                            process.stderr.write(
+                                `[pi-xai-ws] reasoning-only replay after transport failure: ${reason}\n`,
+                            );
+                        }
+                        resetPartialForReplay(output);
+                        continue;
                     }
-                    return projectAssistantResponse(model, output);
-                },
-                storeResponses,
-            });
-            await processResponsesStreamFn(
-                events as Parameters<typeof processResponsesStreamFn>[0],
-                output,
-                stream,
-                model,
-                { onProviderStreamEvent: preparedOptions.onProviderStreamEvent },
-            );
+                    throw error;
+                }
+                break;
+            }
 
             if (preparedOptions.signal?.aborted) {
                 throw new Error("Request was aborted");
