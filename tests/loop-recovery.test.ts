@@ -555,3 +555,95 @@ function makeBlock(length: number): string {
     }
     return value.slice(0, length);
 }
+
+describe("registerLoopRecovery replay reset", () => {
+    // Long text whose word 5-grams are all unique: the low-novelty backstop
+    // (48k+ chars, normalized 5-gram sets, no alignment sensitivity) is the
+    // route that reliably fires when a second attempt re-streams the same
+    // reasoning, which is exactly what an in-turn transport replay does.
+    // Digits are avoided because the detector normalizes them away.
+    function indexWord(index: number): string {
+        let value = "";
+        let remaining = index;
+        do {
+            value = String.fromCharCode(97 + (remaining % 26)) + value;
+            remaining = Math.floor(remaining / 26);
+        } while (remaining > 0);
+        return `q${value.padStart(4, "a")}`;
+    }
+
+    function uniqueThinking(sentences: number): string {
+        const parts: string[] = [];
+        for (let i = 0; i < sentences; i++) {
+            const base = i * 8;
+            parts.push(
+                `${indexWord(base)} ${indexWord(base + 1)} ${indexWord(base + 2)} ${indexWord(base + 3)} ${indexWord(base + 4)} extends the ${indexWord(base + 5)} derivation past ${indexWord(base + 6)} toward ${indexWord(base + 7)}.`,
+            );
+        }
+        return parts.join(" ");
+    }
+
+    function streamThinking(
+        harness: ReturnType<typeof setupRecovery>,
+        message: AssistantMessage,
+        text: string,
+    ): void {
+        for (let offset = 0; offset < text.length; offset += 257) {
+            const delta = text.slice(offset, offset + 257);
+            const content = message.content[0];
+            if (content?.type === "thinking") {
+                content.thinking += delta;
+            }
+            emitFirst(harness.handlers, "message_update", {
+                assistantMessageEvent: {
+                    contentIndex: 0,
+                    delta,
+                    partial: message,
+                    type: "thinking_delta",
+                },
+                message,
+            }, harness.ctx);
+            if (harness.aborts.length > 0) {
+                return;
+            }
+        }
+    }
+
+    it("resets the detector when a thinking block restarts after an in-turn replay", () => {
+        // One pass stays under the 48k low-novelty gate; two passes put the
+        // first copy inside the detector's 56k window with the second copy's
+        // tail as the recent 8k, which must read as fully seen.
+        const text = uniqueThinking(380);
+
+        // Control: streaming the same long reasoning twice in one block is a
+        // low-novelty loop and must abort, proving the test can see a leaked
+        // detector across the attempt boundary.
+        const control = setupRecovery();
+        const controlMessage = assistantMessage(1, [{ thinking: "", type: "thinking" }]);
+        streamThinking(control, controlMessage, text);
+        streamThinking(control, controlMessage, text);
+        assert.equal(control.aborts.length, 1);
+
+        // Replay: the same restart, but the in-turn replay emits a fresh
+        // thinking_start for the replaced block first. The detector must
+        // start over, so re-streaming the reasoning from scratch is not a loop.
+        const replay = setupRecovery();
+        const replayMessage = assistantMessage(2, [{ thinking: "", type: "thinking" }]);
+        streamThinking(replay, replayMessage, text);
+        assert.equal(replay.aborts.length, 0);
+        const content = replayMessage.content[0];
+        if (content?.type === "thinking") {
+            content.thinking = "";
+        }
+        emitFirst(replay.handlers, "message_update", {
+            assistantMessageEvent: {
+                contentIndex: 0,
+                partial: replayMessage,
+                type: "thinking_start",
+            },
+            message: replayMessage,
+        }, replay.ctx);
+        streamThinking(replay, replayMessage, text);
+        assert.equal(replay.aborts.length, 0);
+    });
+});

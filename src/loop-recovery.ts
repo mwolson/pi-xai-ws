@@ -95,6 +95,14 @@ export function registerLoopRecovery(pi: ExtensionAPI): void {
             state.activeBlock = undefined;
             return;
         }
+        if (update.type === "thinking_start" || update.type === "text_start") {
+            // A start event for a block that is already streaming can only come
+            // from an in-turn transport replay that replaced the partial
+            // message. Drop the detector so the replacement stream is judged on
+            // its own text instead of concatenated with the abandoned prefix.
+            state.activeBlock = undefined;
+            return;
+        }
         if (update.type !== "thinking_delta" && update.type !== "text_delta") {
             return;
         }

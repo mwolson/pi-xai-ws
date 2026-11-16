@@ -320,14 +320,40 @@ The transport permits one pre-output retry when all of these conditions hold:
 Output includes text, reasoning and reasoning summaries, refusals, output
 items, function-call arguments, custom-tool input, and provider-tool lifecycle
 events such as web search, code interpreter, file search, and MCP calls. Once
-any such event arrives, the transport cannot safely restart the in-flight stream internally.
-The transport reports an error instead, after which Pi's separate retry policy
-may start a new assistant attempt from local context.
+any such event arrives, the transport cannot safely restart the in-flight
+stream internally at the socket layer, because the raw event feed into Pi's
+stream converter would duplicate. The transport reports an error instead,
+after which Pi's separate retry policy may start a new assistant attempt from
+local context.
 
-A default-mode retry sends complete local history again. A stored-mode retry
-opens a replacement socket and replans from the durable checkpoint plus every
-locally recorded item after it. It does not resend only the newest suffix
-against a response ID whose latest meaning existed only on the failed socket.
+### Reasoning-only stream replay
+
+One exception covers the common mid-thinking drop. When a replayable
+connection, socket, or liveness failure arrives after output started but the
+attempt has only carried reasoning-family events and the partial assistant
+message still contains thinking blocks alone, the stream layer clears that
+partial message and reconnects once inside the same Pi turn. Pi consumes
+partial messages as snapshots of one mutated object, so the reset keeps the
+streaming view and the final message consistent without ending the stream or
+emitting a transport-error event when recovery succeeds.
+
+The replay is bounded to one attempt per stream. It fires only when no text,
+tool call, refusal, or provider-tool lifecycle event has been observed on the
+wire, because those events reach provider-stream hooks and downstream
+consumers even when they add no content block. `PI_XAI_WS_REASONING_REPLAY=0`
+disables it; once anything beyond reasoning has streamed, the stream layer
+reports the error and leaves recovery to Pi's outer retry, exactly as before.
+A replayed attempt opens a replacement socket and may also use the pool's own
+pre-output retry there, so one stream-level replay can span an extra
+connection. The failed attempt's stored continuation is cleared, so a replay
+in stored mode resends full local history rather than continuing from the
+durable checkpoint. Provider-stream hooks observe both attempts.
+
+A default-mode retry sends complete local history again. A stored-mode
+pre-output retry at the pool layer opens a replacement socket and replans from
+the durable checkpoint plus every locally recorded item after it. It does not
+resend only the newest suffix against a response ID whose latest meaning
+existed only on the failed socket.
 
 Malformed JSON, non-object frames, inbound payload-limit failures, event queue
 overflow, lifecycle errors, and aborts never replay. Neither do provider errors

@@ -239,3 +239,13 @@ export function resolveWsIdleTimeoutMs(): number {
 export function resolveWsMaxAgeMs(): number {
     return readPositiveInt("PI_XAI_WS_MAX_AGE_MS", DEFAULT_WS_MAX_AGE_MS);
 }
+
+/**
+ * One in-turn replay after a replayable socket failure when only
+ * reasoning blocks have streamed. On by default; `PI_XAI_WS_REASONING_REPLAY=0`
+ * or `=false` disables it for troubleshooting.
+ */
+export function reasoningReplayEnabled(): boolean {
+    const raw = process.env.PI_XAI_WS_REASONING_REPLAY?.trim().toLowerCase();
+    return raw !== "0" && raw !== "false";
+}
