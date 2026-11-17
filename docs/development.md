@@ -23,7 +23,7 @@ catalog and verifies that `grok-4.7` still resolves to `openai-responses`.
 | --- | --- |
 | `src/index.ts` | Extension entry point. |
 | `src/provider.ts` | xAI provider registration and API matching. |
-| `src/stream.ts` | Pi stream setup, hooks, storage safety enforcement, output projection, and error completion. |
+| `src/stream.ts` | Pi stream setup, hooks, storage safety enforcement, the reasoning-only replay, output projection, and error completion. |
 | `src/payload.ts` | Pi option preparation, full-context payloads, tools, reasoning, headers, and cache affinity. |
 | `src/continuation.ts` | Stored-response chain planning, canonical prefix digests, and rejection detection. |
 | `src/empty-thinking.ts` | Same-run Grok recovery after a mid-loop thinking-only stop. |
@@ -77,6 +77,15 @@ and tool declarations live on its leading system message. Read tools through
 `resolveRequestToolsFn` in `src/payload.ts`, which calls the host's
 `resolveTranscriptTools` helper. A transport that still reads `Context.tools`
 declares no tools, and Grok writes tool calls as prose instead of calling them.
+
+Pi 1.4.0 changed the helper's second argument from a boolean
+(`supportsToolAdditions`) to a support level: `"none"`, `"additions"`, or
+`"changes"`. The transport wants every tool folded into the request, which is
+`false` before 1.4.0 and `"none"` from 1.4.0 on. Passing `false` to the newer
+helper selects the additions level, and tools added later in a session are then
+missing from the request. `transcriptToolSupportNone` in `src/pi-ai-api.ts`
+picks the argument by whether the host exports `PI_AI_VERSION`, which arrived
+in the same release.
 
 Compile against current Pi packages in `devDependencies` so `npm test` exercises
 that contract. `tests/payload.test.ts` covers a transcript `toolsAdded` system
@@ -174,13 +183,64 @@ rules when adding or changing protocol events:
 9. Disposal wakes waiters and prevents reconnects.
 10. Maximum socket age interrupts active requests before xAI's hard limit.
 11. Any connection-limit response retires its physical socket, including after output.
+12. A socket holds the host's event loop only while a request is in flight. An
+    idle pooled socket is unreferenced so it cannot keep Pi alive, and a request
+    references it again. Without that, a host with nothing else pending, such as
+    `pi -p` with stdin closed, exits with status 0 in the middle of a response.
 
 When xAI adds an output event, update `isModelOutputEvent` before projecting the
 event. Missing an output type can cause a complete request to replay after the
 model has already started work.
 
+Rules 3 and 4 describe the socket layer. `src/stream.ts` adds one replay above
+it, covered in the next section.
+
 When xAI adds a terminal event, update terminal detection and add a transport
 test proving that the generator settles after that event.
+
+## Reasoning-only stream replay
+
+`streamXaiResponsesWs` in `src/stream.ts` runs the session iterator in a loop.
+When a replayable connection, socket, or liveness error arrives after output
+started, and the attempt has carried only reasoning, it clears the partial
+message and starts a second attempt in the same Pi turn. The socket layer
+cannot do this itself: replaying there would feed a second copy of the raw
+events into one `processResponsesStream` call. Each loop pass makes a new call
+with fresh slot state instead. [Transport](transport.md) describes the behavior
+from the outside.
+
+Keep these rules when changing it:
+
+1. One replay per stream. A second failure reaches the normal error path, and
+   Pi's outer retry takes over.
+2. Eligibility comes from the raw event stream as well as the message content.
+   `isReasoningOnlyOutputEvent` in `src/ws-events.ts` decides which events keep
+   an attempt eligible. Provider-tool lifecycle events add no content block, yet
+   provider-stream hooks see them, so they disqualify the replay on their own.
+3. `resetPartialForReplay` must clear every field `processResponsesStream`
+   writes on the assistant message: `content`, `responseId`, `stopReason`,
+   `errorMessage`, `rawStopReason`, and `usage`. When a Pi upgrade adds a
+   field, reset it there too.
+4. `onResponse` fires once per stream. Provider-stream hooks fire for both
+   attempts.
+5. The request payload is shared by both attempts, so nothing may mutate it in
+   place. The session plans each wire request as a copy.
+6. In stored mode the failed attempt clears the continuation on its way out,
+   so the replay sends full local history with `store: true` and no
+   `previous_response_id`.
+
+When xAI adds a reasoning event whose type does not start with
+`response.reasoning`, add it to `isReasoningOnlyOutputEvent`. Leaving it out is
+the safe failure: the replay stops firing and the turn reports the error as it
+did before.
+
+A replay shows up in Pi's event stream as a second `thinking_start` for a
+content index that never received a `thinking_end`. Pi renders from the
+`partial` snapshot, so its own view stays correct. A client that appends
+deltas per content index must clear its buffer on that start event, or it shows
+the abandoned reasoning in front of the replacement. `src/loop-recovery.ts`
+does this for the repetition detector, so the second pass of similar reasoning
+is not judged as a loop.
 
 ## Test strategy
 
@@ -200,6 +260,8 @@ xAI. It should prove:
 - Privacy enforcement after hooks
 - Transport identity rotation
 - Pre-output retry, durable-checkpoint recovery, and post-output suppression
+- The reasoning-only replay, each event family that disqualifies it, and its
+  one-attempt bound
 - Abort races and queued aborts
 - Disposal barriers
 - Idle and maximum-age rotation
@@ -208,6 +270,10 @@ xAI. It should prove:
 - Repeated and cycling socket-local response IDs across multiple reconnects
 - Missing stored-response references and one bounded full-context fallback
 - Proactive storage downgrade at the configured context-token boundary
+
+A test that compares a loader result against a path under `tmpdir()` must
+realpath the temporary directory first. `src/pi-ai-api.ts` realpaths its seed
+path, and on macOS `tmpdir()` sits behind the `/var` symlink to `/private/var`.
 
 The catalog integration test checks Pi's current remote model metadata. Keep it
 outside `npm test` so routine local tests remain deterministic.
