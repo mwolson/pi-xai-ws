@@ -2,7 +2,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveTranscriptTools } from "@earendil-works/pi-ai";
+import * as piAi from "@earendil-works/pi-ai";
 import type { clampOpenAIPromptCacheKey } from "@earendil-works/pi-ai/api/openai-prompt-cache";
 import type { buildBaseOptions } from "@earendil-works/pi-ai/api/simple-options";
 import type {
@@ -118,14 +118,26 @@ export const buildBaseOptionsFn = (simpleOptions?.["buildBaseOptions"] ??
     fallbackBuildBaseOptions) as typeof buildBaseOptions;
 
 /**
- * `resolveTranscriptTools(messages, supportsToolAdditions)` from the aliased
- * `@earendil-works/pi-ai` compat surface. Compiled binaries expose it there
- * even when `dist/utils` is not on disk.
+ * `resolveTranscriptTools` from the aliased `@earendil-works/pi-ai` compat
+ * surface. Compiled binaries expose it there even when `dist/utils` is not on
+ * disk. Pi 1.4.0 replaced its boolean `supportsToolAdditions` argument with a
+ * support level, where `"none"` is the old `false`. Passing `false` to the new
+ * signature selects the additions level instead, which leaves tools added
+ * later in the transcript out of the request.
  */
 type TranscriptToolsResolver = (
     messages: readonly unknown[],
-    supportsToolAdditions: boolean,
+    support: boolean | "none",
 ) => { requestTools?: readonly unknown[] } | undefined;
+
+const piAiExports = piAi as unknown as Record<string, unknown>;
+
+/** Pi began exporting `PI_AI_VERSION` in 1.4.0, with the support-level signature. */
+export function transcriptToolSupportNone(
+    exports: Record<string, unknown> = piAiExports,
+): boolean | "none" {
+    return typeof exports["PI_AI_VERSION"] === "string" ? "none" : false;
+}
 
 /**
  * Tools the request must declare.
@@ -138,6 +150,7 @@ type TranscriptToolsResolver = (
 export function resolveRequestToolsFn(context: { messages?: readonly unknown[] }): readonly unknown[] {
     // The transport declares one complete tool list at the top level, so it
     // never anchors later additions at an individual message.
-    const resolved = (resolveTranscriptTools as TranscriptToolsResolver)(context.messages ?? [], false);
+    const resolve = piAiExports["resolveTranscriptTools"] as TranscriptToolsResolver;
+    const resolved = resolve(context.messages ?? [], transcriptToolSupportNone());
     return resolved?.requestTools ?? [];
 }

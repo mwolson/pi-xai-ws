@@ -4,6 +4,7 @@ import {
     existsSync,
     mkdirSync,
     mkdtempSync,
+    realpathSync,
     rmSync,
     symlinkSync,
     writeFileSync,
@@ -21,6 +22,7 @@ import {
     resolveRequestToolsFn,
     resolvePiAiApiFile,
     resolvePiAiDistFile,
+    transcriptToolSupportNone,
 } from "../src/pi-ai-api.ts";
 
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
@@ -90,6 +92,11 @@ describe("pi-ai API compatibility loader", () => {
         }
     });
 
+    it("asks for folded tools in the form the host Pi version understands", () => {
+        assert.equal(transcriptToolSupportNone({ PI_AI_VERSION: "1.4.0" }), "none");
+        assert.equal(transcriptToolSupportNone({}), false);
+    });
+
     it("declares no tools when the transcript declares none", () => {
         assert.deepEqual(resolveRequestToolsFn({ messages: [] }), []);
     });
@@ -121,7 +128,8 @@ describe("pi-ai API compatibility loader", () => {
 });
 
 function makeGlobalPiLayout(): { root: string; binPi: string; piAiDist: string } {
-    const root = mkdtempSync(join(tmpdir(), "pi-ai-layout-"));
+    // macOS tmpdir() sits behind the /var symlink, and the loader realpaths its seed.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-ai-layout-")));
     const agentRoot = join(
         root,
         "prefix",

@@ -28,14 +28,18 @@ describe("Responses payload tools", () => {
         parameters: { type: "object", properties: {} },
     };
 
-    it("declares tools carried by a transcript system message", () => {
-        // Tool declarations live on the leading system message. Reading
-        // `Context.tools` there declared no tools at all, so Grok improvised
-        // tool calls as prose instead of calling them.
+    it("declares tools carried by transcript system messages", () => {
+        // Tool declarations live on system messages. Reading `Context.tools`
+        // there declared no tools at all, so Grok improvised tool calls as
+        // prose instead of calling them. A tool added later in the session
+        // must be declared too: the transport sends one complete list.
+        const laterTool = { ...tool, name: "read", description: "read a file" };
         const transcript = {
             messages: [
                 { role: "system", content: "You are a coding assistant.", toolsAdded: [tool] },
                 { role: "user", content: "hello", timestamp: 1 },
+                { role: "system", content: "", toolsAdded: [laterTool] },
+                { role: "user", content: "again", timestamp: 2 },
             ],
         };
         const payload = buildResponseCreate(
@@ -46,8 +50,7 @@ describe("Responses payload tools", () => {
 
         const declared = payload.tools as Array<Record<string, unknown>> | undefined;
         assert.ok(Array.isArray(declared), "transcript tool declarations must reach the request");
-        assert.equal(declared.length, 1);
-        assert.equal(declared[0]?.name, "bash");
+        assert.deepEqual(declared.map((entry) => entry.name), ["bash", "read"]);
     });
 
     it("omits the tools field when the request declares none", () => {
