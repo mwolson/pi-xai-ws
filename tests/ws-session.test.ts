@@ -174,6 +174,41 @@ describe("XaiWsSessionPool", () => {
         }
     });
 
+    it("holds the event loop only while a request is in flight", async () => {
+        // An idle pooled socket is unreferenced so it cannot keep the host
+        // alive. A request must reference it again, or a host with nothing
+        // else pending exits in the middle of a response.
+        const input = [{ role: "user", text: "event loop" }];
+        const calls: string[] = [];
+        let heldWhenServerReplied: string | undefined;
+        const harness = await createHarness((socket) => {
+            heldWhenServerReplied = calls.at(-1);
+            completed(socket, "response-1");
+        });
+        const pool = new XaiWsSessionPool({ idleTimeoutMs: 10_000, maxSocketAgeMs: 10_000 });
+        const originalRef = Socket.prototype.ref;
+        const originalUnref = Socket.prototype.unref;
+        Socket.prototype.ref = function ref() {
+            calls.push("ref");
+            return originalRef.call(this);
+        };
+        Socket.prototype.unref = function unref() {
+            calls.push("unref");
+            return originalUnref.call(this);
+        };
+        try {
+            await collect(pool, requestOptions(harness.url, input));
+
+            assert.equal(heldWhenServerReplied, "ref");
+            assert.deepEqual(calls, ["unref", "ref", "unref"]);
+        } finally {
+            Socket.prototype.ref = originalRef;
+            Socket.prototype.unref = originalUnref;
+            pool.closeAll();
+            await harness.close();
+        }
+    });
+
     it("overrides hook-supplied storage and continuation fields", async () => {
         const input = [{ role: "user", text: "privacy" }];
         const harness = await createHarness((socket) => completed(socket, "response-1"));

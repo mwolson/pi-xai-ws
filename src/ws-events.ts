@@ -379,6 +379,22 @@ function isConnectionLimitReached(event: Record<string, unknown>): boolean {
     return eventErrorCode(event) === "websocket_connection_limit_reached";
 }
 
+/**
+ * An idle pooled socket must not keep the host process alive, but a request in
+ * flight must: with nothing else holding the event loop, such as Pi's print
+ * mode with stdin closed, Node would exit with status 0 in the middle of a
+ * response.
+ */
+function holdEventLoop(socket: WebSocket, hold: boolean): void {
+    const tcp = (socket as WebSocket & { _socket?: { ref?: () => void; unref?: () => void } })
+        ._socket;
+    if (hold) {
+        tcp?.ref?.();
+    } else {
+        tcp?.unref?.();
+    }
+}
+
 function socketDropError(error: unknown, outputStarted: boolean): XaiWsTransportError {
     if (error instanceof XaiWsTransportError) {
         return error;
@@ -479,6 +495,7 @@ class XaiWsSocket {
             socket: state,
         };
         this.currentRequest = pending;
+        holdEventLoop(state.socket, true);
         const onAbort = () => {
             pending.error = abortError();
             pending.queue.length = 0;
@@ -528,6 +545,7 @@ class XaiWsSocket {
             options.signal?.removeEventListener("abort", onAbort);
             if (this.currentRequest === pending) {
                 this.currentRequest = undefined;
+                holdEventLoop(state.socket, false);
             }
             if (!pending.completed && !pending.error && this.state === state) {
                 const error = new XaiWsTransportError("xAI WebSocket request ended before a terminal event", {
@@ -693,11 +711,10 @@ class XaiWsSocket {
                     const nodeSocket = socket as WebSocket & {
                         _socket?: {
                             setKeepAlive?: (enable?: boolean, initialDelay?: number) => unknown;
-                            unref?: () => void;
                         };
                     };
                     nodeSocket._socket?.setKeepAlive?.(true, TCP_KEEPALIVE_INITIAL_DELAY_MS);
-                    nodeSocket._socket?.unref?.();
+                    holdEventLoop(socket, false);
                     state.ageTimer = setTimeout(() => {
                         if (this.state !== state || state.closed) {
                             return;
