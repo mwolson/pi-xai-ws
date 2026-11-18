@@ -4,6 +4,8 @@ import {
     existsSync,
     mkdirSync,
     mkdtempSync,
+    readdirSync,
+    readFileSync,
     realpathSync,
     rmSync,
     symlinkSync,
@@ -15,6 +17,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+    assertSupportedPiVersion,
     buildBaseOptionsFn,
     convertResponsesMessagesFn,
     convertResponsesToolsFn,
@@ -22,7 +25,6 @@ import {
     resolveRequestToolsFn,
     resolvePiAiApiFile,
     resolvePiAiDistFile,
-    transcriptToolSupportNone,
 } from "../src/pi-ai-api.ts";
 
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
@@ -92,9 +94,46 @@ describe("pi-ai API compatibility loader", () => {
         }
     });
 
-    it("asks for folded tools in the form the host Pi version understands", () => {
-        assert.equal(transcriptToolSupportNone({ PI_AI_VERSION: "1.4.0" }), "none");
-        assert.equal(transcriptToolSupportNone({}), false);
+    it("refuses to load on a Pi older than the minimum", () => {
+        for (const version of ["1.5.0", "1.5.2", "1.10.0", "2.0.0"]) {
+            assert.doesNotThrow(() => assertSupportedPiVersion({ PI_AI_VERSION: version }));
+        }
+        assert.throws(
+            () => assertSupportedPiVersion({ PI_AI_VERSION: "1.4.1" }),
+            /requires Pi 1\.5\.0 or newer, and this is Pi 1\.4\.1/,
+        );
+        // Pi before 1.4.0 does not export its version.
+        assert.throws(() => assertSupportedPiVersion({}), /requires Pi 1\.5\.0 or newer/);
+    });
+
+    it("keeps the fallback helpers on exports the minimum Pi has", () => {
+        // Pi 1.5.0 exports these. A regenerated helper that needs anything newer
+        // means raising MINIMUM_PI_VERSION and the README with it.
+        const minimumHostExports = [
+            "ToolCallArgumentsStream",
+            "calculateCost",
+            "clampThinkingLevel",
+            "getSystemMessageText",
+            "renderSystemMessageUpdate",
+            "resolveTranscript",
+            "resolveTranscriptTools",
+        ];
+        const fallbackDir = join(repoRoot, "src", "pi-ai-fallback");
+        const hostImports = new Set<string>();
+        for (const file of readdirSync(fallbackDir)) {
+            const source = readFileSync(join(fallbackDir, file), "utf8");
+            for (const match of source.matchAll(
+                /import\s*\{([^}]*)\}\s*from\s*"@earendil-works\/pi-ai"/g,
+            )) {
+                for (const name of (match[1] ?? "").split(",")) {
+                    const imported = name.trim().split(/\s+as\s+/)[0];
+                    if (imported) {
+                        hostImports.add(imported);
+                    }
+                }
+            }
+        }
+        assert.deepEqual([...hostImports].sort(), minimumHostExports);
     });
 
     it("declares no tools when the transcript declares none", () => {

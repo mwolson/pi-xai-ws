@@ -66,6 +66,20 @@ paths, then use `src/pi-ai-fallback/` copies that statically import the aliased
 `@earendil-works/pi-ai` compat surface. Native `createRequire("@earendil-works/pi-ai")`
 bypasses that alias and fails on those hosts.
 
+## Minimum Pi version
+
+`MINIMUM_PI_VERSION` in `src/pi-ai-api.ts` is 1.5.0, and the extension throws at
+load on anything older, reading `PI_AI_VERSION` from the alias. The floor comes
+from the fallback copies: a compiled host of any supported version can land on
+them, and they import `ToolCallArgumentsStream`, which Pi exports from 1.5.0.
+Release 1.5.0 regenerated the copies and still claimed Pi 0.86.0, so every tool
+call failed on compiled hosts older than Pi 1.5.0.
+
+A test in `tests/pi-ai-api.test.ts` pins what the copies import from the alias
+to what the minimum Pi exports. When a regenerated copy needs a newer export,
+raise `MINIMUM_PI_VERSION`, the README's requirement and the `peerDependencies`
+ranges together. Do not add per-version branches to keep an older Pi working.
+
 Read transcript tool declarations with `resolveTranscriptTools` from
 `@earendil-works/pi-ai`. That helper is on the compat surface, so it works on
 both Node CLI hosts and compiled binaries.
@@ -78,14 +92,10 @@ and tool declarations live on its leading system message. Read tools through
 `resolveTranscriptTools` helper. A transport that still reads `Context.tools`
 declares no tools, and Grok writes tool calls as prose instead of calling them.
 
-Pi 1.4.0 changed the helper's second argument from a boolean
-(`supportsToolAdditions`) to a support level: `"none"`, `"additions"`, or
+The helper's second argument is a support level: `"none"`, `"additions"`, or
 `"changes"`. The transport wants every tool folded into the request, which is
-`false` before 1.4.0 and `"none"` from 1.4.0 on. Passing `false` to the newer
-helper selects the additions level, and tools added later in a session are then
-missing from the request. `transcriptToolSupportNone` in `src/pi-ai-api.ts`
-picks the argument by whether the host exports `PI_AI_VERSION`, which arrived
-in the same release.
+`"none"`. Any other level leaves the tools of a later `toolsAdded` message out
+of the request.
 
 Compile against current Pi packages in `devDependencies` so `npm test` exercises
 that contract. `tests/payload.test.ts` covers a transcript `toolsAdded` system

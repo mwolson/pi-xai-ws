@@ -45,8 +45,8 @@
     "ws": "^8.18.3"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-ai": ">=1.5.0",
+    "@earendil-works/pi-coding-agent": ">=1.5.0"
   },
   "engines": {
     "node": ">=22.19.0"

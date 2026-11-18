@@ -9,7 +9,8 @@ performance and coherent caching.
 
 ## Requirements
 
-`pi-xai-ws` requires Pi 0.86.0 or newer.
+`pi-xai-ws` requires Pi 1.5.0 or newer, and refuses to load on an older Pi. The
+last release for Pi 0.86.0 through 1.4.x is `@mwolson-org/pi-xai-ws@1.4.1`.
 
 ## Install
 

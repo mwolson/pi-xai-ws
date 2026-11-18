@@ -117,27 +117,43 @@ export const clampOpenAIPromptCacheKeyFn = (promptCache?.["clampOpenAIPromptCach
 export const buildBaseOptionsFn = (simpleOptions?.["buildBaseOptions"] ??
     fallbackBuildBaseOptions) as typeof buildBaseOptions;
 
+const piAiExports = piAi as unknown as Record<string, unknown>;
+
+/**
+ * Oldest Pi this package runs on. The bundled fallback helpers import
+ * `ToolCallArgumentsStream`, which Pi exports from 1.5.0.
+ */
+export const MINIMUM_PI_VERSION = "1.5.0";
+
+/**
+ * Throws when the host Pi is older than {@link MINIMUM_PI_VERSION}. Pi exports
+ * `PI_AI_VERSION` from 1.4.0, so a host without it is too old as well.
+ */
+export function assertSupportedPiVersion(exports: Record<string, unknown> = piAiExports): void {
+    const version = exports["PI_AI_VERSION"];
+    const found = typeof version === "string" ? version : undefined;
+    const numbers = (value: string) => value.split(/[.-]/).map((part) => Number.parseInt(part, 10));
+    const [major = 0, minor = 0] = found === undefined ? [] : numbers(found);
+    const [minMajor = 0, minMinor = 0] = numbers(MINIMUM_PI_VERSION);
+    if (major > minMajor || (major === minMajor && minor >= minMinor)) {
+        return;
+    }
+    throw new Error(
+        `pi-xai-ws requires Pi ${MINIMUM_PI_VERSION} or newer, and this is Pi ${found ?? "older than 1.4.0"}. ` +
+            "Update Pi, or install @mwolson-org/pi-xai-ws@1.4.1.",
+    );
+}
+
 /**
  * `resolveTranscriptTools` from the aliased `@earendil-works/pi-ai` compat
  * surface. Compiled binaries expose it there even when `dist/utils` is not on
- * disk. Pi 1.4.0 replaced its boolean `supportsToolAdditions` argument with a
- * support level, where `"none"` is the old `false`. Passing `false` to the new
- * signature selects the additions level instead, which leaves tools added
- * later in the transcript out of the request.
+ * disk. Its second argument is a support level: `"none"` folds every tool,
+ * including ones a later `toolsAdded` message carries, into the request.
  */
 type TranscriptToolsResolver = (
     messages: readonly unknown[],
-    support: boolean | "none",
+    support: "none",
 ) => { requestTools?: readonly unknown[] } | undefined;
-
-const piAiExports = piAi as unknown as Record<string, unknown>;
-
-/** Pi began exporting `PI_AI_VERSION` in 1.4.0, with the support-level signature. */
-export function transcriptToolSupportNone(
-    exports: Record<string, unknown> = piAiExports,
-): boolean | "none" {
-    return typeof exports["PI_AI_VERSION"] === "string" ? "none" : false;
-}
 
 /**
  * Tools the request must declare.
@@ -151,6 +167,6 @@ export function resolveRequestToolsFn(context: { messages?: readonly unknown[] }
     // The transport declares one complete tool list at the top level, so it
     // never anchors later additions at an individual message.
     const resolve = piAiExports["resolveTranscriptTools"] as TranscriptToolsResolver;
-    const resolved = resolve(context.messages ?? [], transcriptToolSupportNone());
+    const resolved = resolve(context.messages ?? [], "none");
     return resolved?.requestTools ?? [];
 }
